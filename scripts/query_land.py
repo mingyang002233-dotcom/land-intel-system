@@ -372,6 +372,9 @@ def build_query(params):
     ]
     values = []
 
+    # 排除日期解析異常（民國日期轉換錯誤導致西元年超出合理範圍）
+    sql_parts.append("AND (lt.trade_date IS NULL OR lt.trade_date BETWEEN '1990-01-01' AND '2100-12-31')")
+
     if params.get('city'):
         sql_parts.append('AND lt.city = ?')
         values.append(params['city'])
