@@ -196,6 +196,22 @@ def run_rules(diff: dict, hot_zones: list[dict]) -> dict:
     # 依 score 排序
     result['A'].sort(key=lambda x: -x['score'])
     result['B'].sort(key=lambda x: -x['score'])
+
+    # A 級去重：同一物件可能以不同 listing_id 重複入庫
+    # 以「地址 + 總價 + 坪數」為 fingerprint，URL 不同也能去重
+    seen: set[str] = set()
+    deduped_a = []
+    for item in result['A']:
+        row = item.get('row') or {}
+        section = row.get('section_raw') or row.get('location_raw') or ''
+        price = str(row.get('total_price_wan') or '')
+        area = str(row.get('area_ping') or '')
+        fp = f'{section}|{price}|{area}'
+        if fp in seen:
+            continue
+        seen.add(fp)
+        deduped_a.append(item)
+    result['A'] = deduped_a
     result['hot_watchlist'].sort(key=lambda x: -x['score'])
 
     return result
