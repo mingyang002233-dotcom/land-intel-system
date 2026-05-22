@@ -1,0 +1,94 @@
+{
+  "__comment__": "v2 config — parse 階段不過濾任何資料；excluded_* 等欄位只供「查詢層」標籤化參考，不再用於 INSERT 前的篩選。",
+
+  "city_code_map": {
+    "a": "台北市",
+    "b": "台中市",
+    "c": "基隆市",
+    "d": "台南市",
+    "e": "高雄市",
+    "f": "新北市",
+    "g": "宜蘭縣",
+    "h": "桃園市",
+    "i": "嘉義市",
+    "j": "新竹縣",
+    "k": "苗栗縣",
+    "m": "南投縣",
+    "n": "彰化縣",
+    "o": "新竹市",
+    "p": "雲林縣",
+    "q": "嘉義縣",
+    "t": "屏東縣",
+    "u": "花蓮縣",
+    "v": "台東縣",
+    "w": "金門縣",
+    "x": "澎湖縣",
+    "z": "連江縣"
+  },
+
+  "source_kind_map": {
+    "_a": "sale",
+    "_b": "presale",
+    "_c": "rent"
+  },
+
+  "main_source_fields": {
+    "district": "鄉鎮市區",
+    "transaction_target": "交易標的",
+    "location_raw": "土地位置建物門牌",
+    "area_sqm": "土地移轉總面積平方公尺",
+    "building_area_sqm": "建物移轉總面積平方公尺",
+    "land_use_zone": "都市土地使用分區",
+    "land_use_type": "非都市土地使用分區",
+    "land_use_definition": "非都市土地使用編定",
+    "trade_date": "交易年月日",
+    "total_price": "總價元",
+    "unit_price_per_sqm": "單價元平方公尺",
+    "transaction_type_a": "移轉層次",
+    "transaction_type_b": "移轉情形",
+    "building_type": "建物型態",
+    "main_use": "主要用途",
+    "main_material": "主要建材",
+    "note": "備註",
+    "record_id": "編號"
+  },
+
+  "rent_source_fields": {
+    "trade_date": "租賃年月日",
+    "total_price": "總額元",
+    "area_sqm": "土地面積平方公尺"
+  },
+
+  "category_rules_comment": "用於 parser 輸出 target_category（規則式分類；不過濾）。順序由上到下，首符合即套用。",
+  "category_rules": [
+    { "name": "車位",   "if_target_contains": ["車位"] },
+    { "name": "預售",   "if_source_kind": "presale" },
+    { "name": "租賃",   "if_source_kind": "rent" },
+    { "name": "房屋",   "if_target_contains": ["房地"] },
+    { "name": "工業",   "if_zone_contains": ["工業", "乙工", "丁工", "甲工"] },
+    { "name": "農地",   "if_zone_contains": ["農業", "農牧", "農地", "一般農業區", "特定農業區", "山坡地保育"] },
+    { "name": "建地",   "if_target_contains": ["土地"], "if_zone_contains": ["住", "商", "建", "甲建", "乙建", "丁建", "鄉村區"] },
+    { "name": "土地",   "if_target_contains": ["土地"] },
+    { "name": "建物",   "if_target_contains": ["建物"] }
+  ],
+
+  "special_note_terms_comment": "用於 query 層判斷 target_category='特殊' 或附加 is_special 標籤（非過濾）。",
+  "special_note_terms": [
+    "贈與", "繼承", "交換", "親友交易", "特殊關係", "異常",
+    "協議價購", "政府機關標讓售", "容積代金基金採購", "未登記建物",
+    "包含公共設施保留地", "瑕疵", "凶宅", "輻射屋", "海砂屋"
+  ],
+
+  "files": {
+    "csv_dir": "../csv/lvr_landcsv",
+    "db_file": "../db/land_intel.db",
+    "log_dir": "../logs"
+  },
+
+  "engine": {
+    "allow_llm": false,
+    "allow_worth_score": false,
+    "allow_titledeed_judgement": false,
+    "filter_at_parse": false
+  }
+}

@@ -1,0 +1,45 @@
+# 環境變數與金鑰（絕對不可進 Git）
+.env
+.env.*
+*.env
+secrets.json
+token.txt
+
+# 資料庫
+db/*.db
+db/*.db-shm
+db/*.db-wal
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# CSV 原始資料（體積大，不入版控）
+csv/
+
+# Log 檔
+logs/
+*.log
+
+# 輸出報表
+output/
+outputs/
+
+# Python 暫存
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# macOS
+.DS_Store
+
+# 暫存 / 備份
+*.tmp
+*.bak
+*.swp
+*.orig
+
+# IDE
+.vscode/
+.idea/
