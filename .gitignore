@@ -4,6 +4,8 @@
 *.env
 secrets.json
 token.txt
+# 範本檔案例外，允許進 Git
+!.env.example
 
 # 資料庫
 db/*.db
