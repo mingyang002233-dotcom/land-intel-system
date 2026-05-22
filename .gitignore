@@ -14,6 +14,12 @@ db/*.db-wal
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/database/*.db
+data/database/*.db-shm
+data/database/*.db-wal
+# 土地主清冊 Excel（含個資，不進 git）
+data/land_master/*.xlsx
+data/land_master/*.xls
 
 # 執行期產生的 JSON 資料（keyword trends 等）
 data/*.json
