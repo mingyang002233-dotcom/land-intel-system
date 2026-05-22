@@ -424,6 +424,26 @@ def build_query(params):
     if params.get('min_area_ping') is not None:
         sql_parts.append('AND area_ping >= ?')
         values.append(params['min_area_ping'])
+    else:
+        # 過濾坪數過小（<5坪）的異常交易，除非明確查詢車位
+        if params.get('category') != '車位':
+            sql_parts.append('AND (lt.area_ping IS NULL OR lt.area_ping >= 5)')
+
+    # 過濾持分、車位殘值等非正常土地交易（排行與統計不含異常資料）
+    if not params.get('include_abnormal'):
+        sql_parts.append(
+            "AND COALESCE(lt.note, '') NOT LIKE '%持分%'"
+        )
+        sql_parts.append(
+            "AND COALESCE(lt.note, '') NOT LIKE '%殘值%'"
+        )
+        if params.get('category') != '車位':
+            sql_parts.append(
+                "AND COALESCE(lt.note, '') NOT LIKE '%車位%'"
+            )
+            sql_parts.append(
+                "AND COALESCE(lt.transaction_target, '') NOT LIKE '%車位%'"
+            )
 
     category_clause, category_values = build_category_clause(params.get('category'))
     if category_clause:
