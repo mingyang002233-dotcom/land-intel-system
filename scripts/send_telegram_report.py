@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from query_land import load_config, parse_natural_query, build_query, format_row
+from query_land import load_config, parse_natural_query, build_query, format_row, build_display_metrics
 import export_report
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -67,9 +67,6 @@ def _format_land_card(idx, row):
     land_num = row.get('land_number') or ''
     loc_raw = row.get('location_raw') or ''
     trade_date = row.get('trade_date') or ''
-    area_ping = row.get('area_ping')
-    total_wan = row.get('total_price_wan')
-    unit_price = row.get('unit_price_per_ping_wan')
     land_use_zone = row.get('land_use_zone') or ''
     note = row.get('note') or ''
 
@@ -84,6 +81,13 @@ def _format_land_card(idx, row):
     land_part = f'{land_num}地號' if land_num else ''
 
     header = f'{idx}. {place}｜{section_part}｜{land_part}' if (section_part or land_part) else f'{idx}. {place}'
+
+    # 統一使用 build_display_metrics 計算坪數與單價（與 bot 查詢一致）
+    metrics = build_display_metrics(row)
+    area_ping = metrics.get('area_ping')
+    unit_price = metrics.get('unit_price')
+    total_wan = row.get('total_price_wan')
+
     area_str = f'{area_ping:.1f}坪' if area_ping else 'N/A'
     total_str = _fmt_total(total_wan)
     unit_str = f'{unit_price:.1f}萬/坪' if unit_price else 'N/A'
