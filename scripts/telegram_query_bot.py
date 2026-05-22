@@ -30,56 +30,56 @@ MAX_MESSAGE_LENGTH = 3500
 PAGE_SIZE = 5
 
 
+def _fmt_total(total_wan):
+    if total_wan is None:
+        return 'N/A'
+    if total_wan >= 10000:
+        return f'{total_wan / 10000:.2f}億'
+    return f'{total_wan:.0f}萬'
+
+
 def format_card(row):
-    metrics = build_display_metrics(row)
-    place = f'{row["city"]}{row["district"] or ""}' if row.get("district") else row["city"]
+    place = f'{row["city"]}{row["district"] or ""}' if row.get("district") else (row.get("city") or '')
     section = row.get('section_name') or ''
     land_num = row.get('land_number') or ''
     loc_raw = row.get('location_raw') or ''
     trade_date = row.get('trade_date') or ''
     land_use_zone = row.get('land_use_zone') or ''
+    note = row.get('note') or ''
+    txn = row.get('transaction_target') or ''
     total = row.get('total_price_wan')
 
-    is_address = '地號' not in loc_raw and any(k in loc_raw for k in ('路', '街', '巷', '弄', '號'))
-
-    # Extract land number from location_raw if land_number column is empty
+    # 從 location_raw 補抓地號
     if not land_num and '地號' in loc_raw:
         m = re.search(r'(\d[\d\-\/]*)\s*地號', loc_raw)
         if m:
             land_num = m.group(1)
 
-    section_disp = re.sub(r'[-]', '？', section)
-    if section_disp and land_num:
-        loc_part = f'{section_disp}{land_num}地號'
-    elif section_disp:
-        loc_part = section_disp
-    elif not is_address and loc_raw:
-        loc_part = loc_raw
+    section_part = section if section else ''
+    land_part = f'{land_num}地號' if land_num else ''
+
+    if section_part or land_part:
+        line1 = f'📍 {place}｜{section_part}｜{land_part}'
     else:
-        loc_part = ''
-    line1 = f'📍 {place}｜{loc_part}' if loc_part else f'📍 {place}'
+        is_address = '地號' not in loc_raw and any(k in loc_raw for k in ('路', '街', '巷', '弄', '號'))
+        line1 = f'📍 {place}｜{loc_raw}' if is_address else f'📍 {place}'
 
-    lines = [line1]
-
-    # Address line (if house transaction)
-    if is_address and loc_raw:
-        lines.append(f'🏠 {loc_raw}')
-
-    # Line 2: date｜transaction type｜zone
-    txn = row.get('transaction_target') or ''
+    metrics = build_display_metrics(row)
+    area_val = f'{metrics["area_ping"]:.1f}坪' if metrics.get('area_ping') else 'N/A'
+    unit_val = f'{metrics["unit_price"]:.1f}萬/坪' if metrics.get('unit_price') else 'N/A'
+    total_val = _fmt_total(total)
     zone_str = f'（{land_use_zone}）' if land_use_zone else ''
-    lines.append(f'📅 {trade_date}｜{txn}{zone_str}')
+    txn_str = f'{txn}' if txn else ''
 
-    # Line 3: area｜unit price｜total
-    area_val = f'{metrics["area_ping"]:.2f}坪' if metrics.get('area_ping') else 'N/A'
-    unit_val = f'{metrics["unit_price"]:.2f}萬/坪' if metrics.get('unit_price') else 'N/A'
-    total_val = f'{total:.0f}萬' if total else 'N/A'
-    area_label = '建物' if metrics.get('area_label') == '建物坪數' else '土地'
-    lines.append(f'📐 {area_label}{area_val}｜💵 {unit_val}｜💰 {total_val}')
-
+    lines = [
+        line1,
+        f'📐 {area_val}｜💰 {total_val}｜💵 {unit_val}',
+        f'📅 成交：{trade_date}　{txn_str}{zone_str}',
+    ]
+    if note:
+        lines.append(f'📝 備註：{note}')
     if metrics.get('warning'):
         lines.append(metrics['warning'])
-
     lines.append('━━━━━━━━━━')
     return '\n'.join(lines)
 

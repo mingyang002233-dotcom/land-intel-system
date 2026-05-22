@@ -58,6 +58,56 @@ def extract_period_text(query_text):
     return custom or '自訂期間'
 
 
+def _format_land_card(idx, row):
+    """單筆土地成交卡片，格式：縣市行政區｜地段｜地號 / 坪數｜總價｜單價 / 成交日 / 備註"""
+    import re as _re
+    city = row.get('city') or ''
+    district = row.get('district') or ''
+    section = row.get('section_name') or ''
+    land_num = row.get('land_number') or ''
+    loc_raw = row.get('location_raw') or ''
+    trade_date = row.get('trade_date') or ''
+    area_ping = row.get('area_ping')
+    total_wan = row.get('total_price_wan')
+    unit_price = row.get('unit_price_per_ping_wan')
+    land_use_zone = row.get('land_use_zone') or ''
+    note = row.get('note') or ''
+
+    # 從 location_raw 補抓地號
+    if not land_num and '地號' in loc_raw:
+        m = _re.search(r'(\d[\d\-\/]*)\s*地號', loc_raw)
+        if m:
+            land_num = m.group(1)
+
+    place = f'{city}{district}'
+    section_part = section if section else ''
+    land_part = f'{land_num}地號' if land_num else ''
+
+    header = f'{idx}. {place}｜{section_part}｜{land_part}' if (section_part or land_part) else f'{idx}. {place}'
+    area_str = f'{area_ping:.1f}坪' if area_ping else 'N/A'
+    total_str = _fmt_total(total_wan)
+    unit_str = f'{unit_price:.1f}萬/坪' if unit_price else 'N/A'
+    zone_str = f'（{land_use_zone}）' if land_use_zone else ''
+
+    lines = [
+        header,
+        f'   {area_str}｜{total_str}｜{unit_str}{zone_str}',
+        f'   成交：{trade_date}',
+    ]
+    if note:
+        lines.append(f'   備註：{note}')
+    lines.append('')
+    return '\n'.join(lines)
+
+
+def _fmt_total(total_wan):
+    if total_wan is None:
+        return 'N/A'
+    if total_wan >= 10000:
+        return f'{total_wan / 10000:.2f}億'
+    return f'{total_wan:.0f}萬'
+
+
 def build_message(query_text, params, results, xlsx_path=None):
     area_line = []
     if params.get('city'):
@@ -71,39 +121,22 @@ def build_message(query_text, params, results, xlsx_path=None):
     lines = [
         '🛰 老蕭 LAND 實價登錄快訊',
         '',
-        '查詢區域：',
-        f'{area_text}',
+        f'查詢區域：{area_text}　期間：{period_text}',
+        f'共 {total} 筆成交',
         '',
-        '期間：',
-        f'{period_text}',
+        '重點案件：',
         '',
-        '本次共找到：',
-        f'{total} 筆土地成交',
-        '',
-        '重點案件：'
     ]
 
     for idx, row in enumerate(results[:10], 1):
-        lines.extend([
-            f'{idx}. 日期：{row["trade_date"]}',
-            f'   地段地號：{row["location_raw"]}',
-            f'   坪數：{row["area_ping"]}',
-            f'   單價：{row["unit_price_per_ping_wan"]}',
-            f'   總價：{row["total_price_wan"]}',
-            f'   使用分區：{row["land_use_zone"] or ""}',
-            f'   是否值得調謄本：{"是" if row["is_recommend"] else "否"}',
-            ''
-        ])
+        lines.append(_format_land_card(idx, row))
 
     if total > 10:
-        lines.append(f'僅顯示前 10 筆，總筆數為 {total} 筆。')
+        lines.append(f'（僅顯示前 10 筆，共 {total} 筆）')
         lines.append('')
 
-    lines.append('最後附註：')
     if xlsx_path:
-        lines.append(f'完整資料請查看 output 匯出的 Excel 報表：{xlsx_path}')
-    else:
-        lines.append('本次查無符合條件的土地成交資料。')
+        lines.append(f'完整報表：{xlsx_path}')
 
     return '\n'.join(lines)
 
