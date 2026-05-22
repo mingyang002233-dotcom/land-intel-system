@@ -20,6 +20,18 @@ data/database/*.db-wal
 # 土地主清冊 Excel（含個資，不進 git）
 data/land_master/*.xlsx
 data/land_master/*.xls
+*.xlsx
+*.xls
+
+# excel土地資料維護 工作區（Desktop，含個資與大型檔案，不進 git）
+excel土地資料維護/output/
+excel土地資料維護/backup/
+excel土地資料維護/logs/
+excel土地資料維護/最新完成版/
+excel土地資料維護/input/
+excel土地資料維護/電傳待解析/
+excel土地資料維護/電傳已完成/
+excel土地資料維護/電傳錯誤/
 
 # 執行期產生的 JSON 資料（keyword trends 等）
 data/*.json
