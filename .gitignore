@@ -13,6 +13,9 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 
+# 執行期產生的 JSON 資料（keyword trends 等）
+data/*.json
+
 # CSV 原始資料（體積大，不入版控）
 csv/
 

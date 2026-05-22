@@ -17,9 +17,14 @@ mkdir -p "$LOG_DIR"
   echo "  LAND 週報 開始：$(date '+%Y-%m-%d %H:%M:%S')"
   echo "======================================================"
 
+  echo "[Step 1] 土地新聞週報"
   "$PYTHON" scripts/weekly_report.py
-
   echo ""
+
+  echo "[Step 2] Google Trends 土地熱搜趨勢推播"
+  "$PYTHON" scripts/keyword_trends.py --push
+  echo ""
+
   echo "======================================================"
   echo "  LAND 週報 完成：$(date '+%Y-%m-%d %H:%M:%S')"
   echo "======================================================"
