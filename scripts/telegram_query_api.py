@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import re
 import socket
 import sqlite3
 import sys
@@ -30,8 +31,22 @@ app = Flask(__name__)
 CONFIG = load_config()
 
 
+_LEADING_NOISE = re.compile(r'^[查問幫我看]+')
+_TRAILING_NOISE = re.compile(r'(實價|成交|登錄|資料|紀錄|記錄)+$')
+_SECTION_LAND_NO = re.compile(r'^([一-鿿]{2,8})(\d[\d\-]+)$')
+
+
+def _preprocess(text: str) -> str:
+    t = _LEADING_NOISE.sub('', text.strip())
+    t = _TRAILING_NOISE.sub('', t).strip()
+    m = _SECTION_LAND_NO.match(t)
+    if m:
+        t = m.group(1) + '段' + m.group(2)
+    return t or text.strip()
+
+
 def make_reply(text: str) -> tuple[str, dict, str, list, int]:
-    params, _ = parse_natural_query(text, CONFIG)
+    params, _ = parse_natural_query(_preprocess(text), CONFIG)
     if not any(params.get(k) for k in ('city', 'district', 'section_name', 'road', 'keyword')):
         reply = '請提供縣市、行政區、地段或關鍵地名，例如：大園區、大興路、內興段。'
         return reply, params, '', [], 0

@@ -33,12 +33,14 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MASTER_DB    = PROJECT_ROOT / 'data' / 'database' / 'land_master.db'
+INTEL_DB     = PROJECT_ROOT / 'db' / 'land_intel.db'
 
 REPLY_KEYBOARD = {
     'keyboard': [
         [{'text': '地主查詢'}, {'text': '實價查詢'}],
         [{'text': '歷史紀錄'}, {'text': '地主名下'}],
-        [{'text': '標記售出'}, {'text': '新增備註'}],
+        [{'text': '591物件'}, {'text': '地主自售'}],
+        [{'text': '新增備註'}],
     ],
     'resize_keyboard': True,
     'one_time_keyboard': False,
@@ -49,9 +51,41 @@ REPLY_KEYBOARD = {
 QUICK_TEXT_TO_CMD = {
     '歷史紀錄': '/history',
     '地主名下': '/owner',
-    '標記售出': '/sold',
     '新增備註': '/note',
 }
+
+PAGE_SIZE = 8
+_PAGE_CACHE: dict[str, dict] = {}  # user_id → {header, lines, offset}
+
+
+def _make_paged_reply(user_id: str, header: str, item_lines: list) -> str:
+    total = len(item_lines)
+    if total <= PAGE_SIZE:
+        _PAGE_CACHE.pop(user_id, None)
+        return header + '\n' + '\n'.join(item_lines)
+    _PAGE_CACHE[user_id] = {'header': header, 'lines': item_lines, 'offset': PAGE_SIZE}
+    remaining = total - PAGE_SIZE
+    return (header + '\n' + '\n'.join(item_lines[:PAGE_SIZE]) +
+            f'\n\n⬇️ 還有 {remaining} 筆，輸入「更多」繼續查看')
+
+
+def _next_page(user_id: str) -> str:
+    cache = _PAGE_CACHE.get(user_id)
+    if not cache:
+        return '沒有待查看的資料，請重新查詢。'
+    lines  = cache['lines']
+    offset = cache['offset']
+    batch  = lines[offset:offset + PAGE_SIZE]
+    new_offset = offset + PAGE_SIZE
+    remaining  = len(lines) - new_offset
+    cache['offset'] = new_offset
+    result = cache['header'] + f'（第 {offset + 1}–{offset + len(batch)} 筆）\n' + '\n'.join(batch)
+    if remaining > 0:
+        result += f'\n\n⬇️ 還有 {remaining} 筆，輸入「更多」繼續查看'
+    else:
+        _PAGE_CACHE.pop(user_id, None)
+        result += '\n\n✅ 已顯示全部結果'
+    return result
 
 
 # ── .env 載入 ────────────────────────────────────────────────────
@@ -226,11 +260,11 @@ def format_record(r: dict) -> str:
     return '\n'.join(lines)
 
 
-def format_candidates(rows: list[dict], hint: str = '') -> str:
-    lines = [f'找到 {len(rows)} 筆，顯示前 10 筆。請加更精準條件。\n']
-    if hint:
-        lines[0] = f'找到 {len(rows)} 筆（{hint}），顯示前 10 筆。請加更精準條件。\n'
-    for i, r in enumerate(rows[:10], 1):
+def format_candidates(rows: list[dict], hint: str = '', user_id: str = '') -> str:
+    total = len(rows)
+    header = f'找到 {total} 筆（{hint}）。' if hint else f'找到 {total} 筆。'
+
+    def _fmt_row(i: int, r: dict) -> str:
         ek = (r.get('event_key') or '')[:8]
         ph = r.get('phone') or '—'
         sub = r.get('sub_section') or ''
@@ -238,11 +272,14 @@ def format_candidates(rows: list[dict], hint: str = '') -> str:
         denom = r.get('share_denom') or 1
         numer = r.get('share_numer') or 0
         share_str = f'{int(numer)}/{int(denom)}'
-        lines.append(
-            f"{i}. {section_disp} {r.get('land_no_raw','')}"
-            f"  👤{r.get('owner_name','?')}  持分:{share_str}  📞{ph}  key:{ek}"
-        )
-    return '\n'.join(lines)
+        return (f"{i}. {section_disp} {r.get('land_no_raw','')}"
+                f"  👤{r.get('owner_name','?')}  持分:{share_str}  📞{ph}  key:{ek}")
+
+    item_lines = [_fmt_row(i, r) for i, r in enumerate(rows, 1)]
+    if user_id:
+        return _make_paged_reply(user_id, header, item_lines)
+    # 無 user_id 時退回顯示前 PAGE_SIZE 筆（向下相容）
+    return header + '\n' + '\n'.join(item_lines[:PAGE_SIZE])
 
 
 # ── /query 核心 ──────────────────────────────────────────────────
@@ -473,7 +510,7 @@ def query_dispatch(args: list[str], user_id: str) -> str:
             if sub_section_hint:
                 cond.append(f'小段 {sub_section_hint}')
             hint = f"地號 {norm_no}" + (f" / {' / '.join(cond)}" if cond else '')
-            body = format_candidates(latest_rows, hint)
+            body = format_candidates(latest_rows, hint, user_id)
             if uncertain:
                 return f'⚠️ 以下包含歷史持分資料\n\n{body}'
             return body
@@ -499,7 +536,7 @@ def query_dispatch(args: list[str], user_id: str) -> str:
         latest_rows = list(seen_lmk.values())
         if len(latest_rows) == 1:
             return format_record(latest_rows[0])
-        return format_candidates(latest_rows, f'所有人「{raw}」')
+        return format_candidates(latest_rows, f'所有人「{raw}」', user_id)
 
     # ── 電話關鍵字（全數字 or 09xx 開頭）
     if re.match(r'^[\d\-]+$', raw) and len(raw) >= 4:
@@ -521,7 +558,7 @@ def query_dispatch(args: list[str], user_id: str) -> str:
         latest_rows = list(seen_lmk.values())
         if len(latest_rows) == 1:
             return format_record(latest_rows[0])
-        return format_candidates(latest_rows, f'電話「{raw}」')
+        return format_candidates(latest_rows, f'電話「{raw}」', user_id)
 
     # ── 地址關鍵字（fallback）
     rows = con.execute("""
@@ -542,7 +579,7 @@ def query_dispatch(args: list[str], user_id: str) -> str:
     latest_rows = list(seen_lmk.values())
     if len(latest_rows) == 1:
         return format_record(latest_rows[0])
-    return format_candidates(latest_rows, f'地址「{raw}」')
+    return format_candidates(latest_rows, f'地址「{raw}」', user_id)
 
 
 # ── /history 核心 ────────────────────────────────────────────────
@@ -583,23 +620,22 @@ def history_dispatch(args: list[str], user_id: str) -> str:
     if not rows:
         return f'找不到地號 {norm_no} 的歷史事件。'
 
-    lines = [f'📜 {norm_no} 歷史登記事件（共 {len(rows)} 筆）\n']
+    header = f'📜 {norm_no} 歷史登記事件（共 {len(rows)} 筆）'
+    item_lines = []
     for i, r in enumerate(rows, 1):
         area = r.get('actual_owned_area')
         area_str = f'{area:.1f} 坪' if area else '—'
         dn = r.get('share_denom') or 1
         nm = r.get('share_numer') or 0
-        ek = (r.get('event_key') or '')[:8]
         sold_mark = ' ✅已售' if r.get('is_sold') == 1 else ''
-        lines.append(
-            f"{i}. [{_reg_date_display(r.get('reg_date',''))}] "
-            f"{r.get('reg_reason') or '—'}  "
-            f"👤{r.get('owner_name','?')}  "
-            f"持分:{int(nm)}/{int(dn)}({area_str}){sold_mark}"
-        )
+        line = (f"{i}. [{_reg_date_display(r.get('reg_date',''))}] "
+                f"{r.get('reg_reason') or '—'}  "
+                f"👤{r.get('owner_name','?')}  "
+                f"持分:{int(nm)}/{int(dn)}({area_str}){sold_mark}")
         if r.get('note'):
-            lines.append(f"   📝 {r['note'][:40]}")
-    return '\n'.join(lines)
+            line += f"\n   📝 {r['note'][:40]}"
+        item_lines.append(line)
+    return _make_paged_reply(user_id, header, item_lines)
 
 
 # ── /owner 核心 ─────────────────────────────────────────────────
@@ -645,31 +681,32 @@ def owner_dispatch(args: list[str], user_id: str) -> str:
     detail_rows  = [dict(r) for r in detail_rows]
     log_query(user_id, 'owner', name, len(detail_rows))
 
-    lines = []
+    # 每個地主 block 壓成一個字串，再套分頁
+    blocks = []
     for owner in summary_rows:
-        ok   = owner['owner_key']
-        nm_  = owner['owner_name']
+        ok    = owner['owner_key']
+        nm_   = owner['owner_name']
         total = owner['total_area'] or 0
-        lines.append(
-            f"👤 {nm_}  "
-            f"（共 {owner['parcel_count']} 筆土地，合計 {total:.1f} 坪）"
-        )
+        block_lines = [
+            f"👤 {nm_}  （共 {owner['parcel_count']} 筆土地，合計 {total:.1f} 坪）"
+        ]
         details = [d for d in detail_rows
                    if d['owner_name'] == nm_ and d['owner_key'] == ok]
         for d in details[:15]:
             sold_mark = ' ✅售' if d.get('is_sold') == 1 else ''
-            area = d.get('actual_owned_area')
-            area_str = f'{area:.1f} 坪' if area else '—'
-            lines.append(
+            area      = d.get('actual_owned_area')
+            area_str  = f'{area:.1f} 坪' if area else '—'
+            block_lines.append(
                 f"  • {d.get('city','')}{d.get('district','')} "
                 f"{d.get('section_raw','')} {d.get('land_no_raw','')}"
                 f"  {area_str}{sold_mark}"
             )
         if len(details) > 15:
-            lines.append(f"  … 還有 {len(details)-15} 筆")
-        lines.append('')
+            block_lines.append(f"  … 還有 {len(details)-15} 筆")
+        blocks.append('\n'.join(block_lines))
 
-    return '\n'.join(lines).rstrip()
+    header = f'找到姓名含「{name}」的地主 {len(summary_rows)} 位：'
+    return _make_paged_reply(user_id, header, blocks)
 
 
 def write_note(event_key: str, new_note: str, user_id: str) -> str:
@@ -937,6 +974,54 @@ def _handle_write(land_raw: str, section_hint: str,
         return candidates_text(matches)
 
 
+def _format_listing(row: dict) -> str:
+    city     = row.get('city') or ''
+    district = row.get('district') or ''
+    section  = row.get('section_raw') or ''
+    area     = row.get('area_ping') or 0
+    price    = row.get('total_price_wan') or 0
+    unit     = row.get('unit_price_wan') or ''
+    seller   = row.get('seller_name') or ''
+    url      = row.get('url') or ''
+    loc      = f'{city}{district}' + (f'｜{section}' if section else '')
+    return f'📍 {loc}\n💰 {price:.0f}萬（{unit}）  📐 {area:.1f}坪\n👤 {seller}\n🔗 {url}'
+
+
+def listings_591(limit: int = 8) -> str:
+    try:
+        con = sqlite3.connect(INTEL_DB, timeout=5)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            'SELECT * FROM land_listings ORDER BY scraped_at DESC LIMIT ?', (limit,)
+        ).fetchall()
+        con.close()
+        if not rows:
+            return '目前無 591 物件資料。'
+        lines = [f'591 最新物件（{len(rows)} 筆）\n']
+        lines += [_format_listing(dict(r)) for r in rows]
+        return '\n\n'.join(lines)
+    except Exception as e:
+        return f'591 查詢錯誤：{e}'
+
+
+def listings_owner_sell(limit: int = 8) -> str:
+    try:
+        con = sqlite3.connect(INTEL_DB, timeout=5)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            'SELECT * FROM land_listings WHERE is_agent=0 ORDER BY scraped_at DESC LIMIT ?',
+            (limit,)
+        ).fetchall()
+        con.close()
+        if not rows:
+            return '目前無地主自售物件資料。'
+        lines = [f'地主自售物件（{len(rows)} 筆）\n']
+        lines += [_format_listing(dict(r)) for r in rows]
+        return '\n\n'.join(lines)
+    except Exception as e:
+        return f'地主自售查詢錯誤：{e}'
+
+
 def help_text() -> str:
     return (
         '🗂 土地情報系統指令\n\n'
@@ -1037,40 +1122,35 @@ class LandMasterBot:
             print(f'[BLOCKED] user_id={user_id} text={text!r}')
             return
 
-        # 若有按鈕狀態，下一則非 / 文字按狀態分流，完成後清除
-        state = self.user_states.get(user_id, '')
-        if state and not text.startswith('/'):
-            try:
-                if state == 'owner_query':
-                    reply = query_dispatch(text.split(), user_id)
-                    self.send(chat_id, reply)
-                elif state == 'realprice_query':
-                    from telegram_query_api import make_reply
-                    reply, _, _, _, _ = make_reply(text)
-                    if isinstance(reply, str) and reply.strip():
-                        self.send(chat_id, reply)
-                    else:
-                        self.send(chat_id, '查無符合的實價登錄資料')
-                else:
-                    self.send(chat_id, '查詢狀態錯誤，請重新點選按鈕。')
-            except Exception:
-                if state == 'owner_query':
-                    self.send(chat_id, '地主查詢發生錯誤，請稍後再試')
-                else:
-                    self.send(chat_id, '實價查詢發生錯誤，請稍後再試')
-            finally:
-                self.user_states.pop(user_id, None)
+        # 分頁「更多」：優先於 state 與自然語言
+        if text == '更多':
+            self.send(chat_id, _next_page(user_id))
             return
 
-        # 非 / 文字：只走實價自然語言查詢，回覆一次後立即結束
+        # 591 / 地主自售 快捷按鈕
+        if text == '591物件':
+            self.send(chat_id, listings_591())
+            return
+        if text == '地主自售':
+            self.send(chat_id, listings_owner_sell())
+            return
+
+        # owner_query 狀態：下一則非 / 文字走地主清冊查詢
+        state = self.user_states.pop(user_id, '')
+        if state == 'owner_query' and not text.startswith('/'):
+            try:
+                reply = query_dispatch(text.split(), user_id)
+                self.send(chat_id, reply)
+            except Exception:
+                self.send(chat_id, '地主查詢發生錯誤，請稍後再試')
+            return
+
+        # 非 / 文字（含 realprice_query 狀態）：走實價自然語言查詢
         if not text.startswith('/'):
             try:
                 from telegram_query_api import make_reply
                 reply, _, _, _, _ = make_reply(text)
-                if isinstance(reply, str) and reply.strip():
-                    self.send(chat_id, reply)
-                else:
-                    self.send(chat_id, '查無符合的實價登錄資料')
+                self.send(chat_id, reply if isinstance(reply, str) and reply.strip() else '查無符合的實價登錄資料')
             except Exception:
                 self.send(chat_id, '實價查詢發生錯誤，請稍後再試')
             return
