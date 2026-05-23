@@ -34,6 +34,25 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MASTER_DB    = PROJECT_ROOT / 'data' / 'database' / 'land_master.db'
 
+REPLY_KEYBOARD = {
+    'keyboard': [
+        [{'text': '地主查詢'}, {'text': '實價查詢'}],
+        [{'text': '歷史紀錄'}, {'text': '地主名下'}],
+        [{'text': '標記售出'}, {'text': '新增備註'}],
+    ],
+    'resize_keyboard': True,
+    'one_time_keyboard': False,
+    'is_persistent': True,
+    'input_field_placeholder': '請選擇功能或直接輸入查詢內容',
+}
+
+QUICK_TEXT_TO_CMD = {
+    '歷史紀錄': '/history',
+    '地主名下': '/owner',
+    '標記售出': '/sold',
+    '新增備註': '/note',
+}
+
 
 # ── .env 載入 ────────────────────────────────────────────────────
 
@@ -182,9 +201,15 @@ def format_record(r: dict) -> str:
     area_str = f'{area:.1f} 坪' if area else '—'
     av = r.get('announced_value')
     av_str = f'{int(av):,} 元/㎡' if av else '—'
+    sub = r.get('sub_section') or ''
+    section_disp = f"{r.get('section_raw','')} {sub}".strip()
+    denom = r.get('share_denom') or 1
+    numer = r.get('share_numer') or 0
+    share_str = f'{int(numer)}/{int(denom)}'
     lines = [
-        f"📍 {r.get('city','')} {r.get('district','')} {r.get('section_raw','')} {r.get('land_no_raw','')}",
+        f"📍 {r.get('city','')} {r.get('district','')} {section_disp} {r.get('land_no_raw','')}",
         f"👤 所有人：{r.get('owner_name') or '—'}",
+        f"🧮 持分：{share_str}",
         f"📞 電話：{r.get('phone') or '—'}",
         f"🏠 地址：{r.get('address') or '—'}",
         f"📌 分區：{r.get('zone_type') or '—'}",
@@ -208,9 +233,14 @@ def format_candidates(rows: list[dict], hint: str = '') -> str:
     for i, r in enumerate(rows[:10], 1):
         ek = (r.get('event_key') or '')[:8]
         ph = r.get('phone') or '—'
+        sub = r.get('sub_section') or ''
+        section_disp = f"{r.get('section_raw','')} {sub}".strip()
+        denom = r.get('share_denom') or 1
+        numer = r.get('share_numer') or 0
+        share_str = f'{int(numer)}/{int(denom)}'
         lines.append(
-            f"{i}. {r.get('section_raw','')} {r.get('land_no_raw','')}"
-            f"  👤{r.get('owner_name','?')}  📞{ph}  key:{ek}"
+            f"{i}. {section_disp} {r.get('land_no_raw','')}"
+            f"  👤{r.get('owner_name','?')}  持分:{share_str}  📞{ph}  key:{ek}"
         )
     return '\n'.join(lines)
 
@@ -219,6 +249,178 @@ def format_candidates(rows: list[dict], hint: str = '') -> str:
 
 def _looks_like_land_no(token: str) -> bool:
     return bool(re.search(r'\d', token)) and bool(re.search(r'[\d\-之]', token))
+
+def _clean_sub_section_hint(token: str) -> str:
+    t = str(token or '').strip()
+    t = re.sub(r'小段$', '', t)
+    return t
+
+def _owner_dedupe_key(row: dict) -> str:
+    owner_key = (row.get('owner_key') or '').strip()
+    if owner_key:
+        return owner_key
+    owner_name = (row.get('owner_name') or '').strip()
+    owner_id = (row.get('owner_id_full') or row.get('owner_id_masked') or '').strip()
+    return f'{owner_name}|{owner_id}'
+
+def _reg_date_sort_tuple(raw) -> tuple[int, int, int]:
+    s = str(raw or '').strip()
+    if not s:
+        return (0, 0, 0)
+    m = re.match(r'^(\d{3})年(\d{1,2})月(\d{1,2})日$', s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})$', s)
+    if m:
+        return (int(m.group(1)) - 1911, int(m.group(2)), int(m.group(3)))
+    return (0, 0, 0)
+
+def _filter_latest_snapshot(rows: list[dict]) -> list[dict]:
+    """
+    僅保留最新登記日那一批資料，避免混入歷史持分人。
+    若全數無可解析登記日，則退回原始資料。
+    """
+    if not rows:
+        return rows
+    dated = []
+    for r in rows:
+        key = _reg_date_sort_tuple(r.get('reg_date'))
+        if key > (0, 0, 0):
+            dated.append((key, r))
+    if not dated:
+        return rows
+    latest_key = max(k for k, _ in dated)
+    return [r for k, r in dated if k == latest_key]
+
+def _safe_int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+def _row_update_sort_value(row: dict) -> str:
+    # ISO-like datetime string can be compared lexicographically.
+    return str(
+        row.get('updated_at')
+        or row.get('imported_at')
+        or row.get('created_at')
+        or ''
+    )
+
+def _row_current_priority_key(row: dict) -> tuple:
+    # 目前持有人判定優先序：
+    # reg_date (新) > reg_seq (新) > updated/imported_at (新)
+    return (
+        _reg_date_sort_tuple(row.get('reg_date')),
+        _safe_int(row.get('reg_seq'), 0),
+        _row_update_sort_value(row),
+    )
+
+def _rows_same_registration_group(rows: list[dict], anchor: dict) -> list[dict]:
+    """
+    以「同一次登記」為群組：
+    - 優先用 reg_date + cause_date + reg_reason
+    - 若 cause_date 缺失，退化為 reg_date + reg_reason
+    - 再退化為 reg_date
+    """
+    anchor_date = _reg_date_sort_tuple(anchor.get('reg_date'))
+    if anchor_date == (0, 0, 0):
+        return [anchor]
+
+    anchor_cause = str(anchor.get('cause_date') or '').strip()
+    anchor_reason = str(anchor.get('reg_reason') or '').strip()
+
+    same_date = [r for r in rows if _reg_date_sort_tuple(r.get('reg_date')) == anchor_date]
+    if not same_date:
+        return [anchor]
+
+    if anchor_cause:
+        by_cause = [r for r in same_date if str(r.get('cause_date') or '').strip() == anchor_cause]
+        if by_cause:
+            if anchor_reason:
+                by_reason = [r for r in by_cause if str(r.get('reg_reason') or '').strip() == anchor_reason]
+                if by_reason:
+                    return by_reason
+            return by_cause
+
+    if anchor_reason:
+        by_reason = [r for r in same_date if str(r.get('reg_reason') or '').strip() == anchor_reason]
+        if by_reason:
+            return by_reason
+
+    return same_date
+
+def _pick_current_owner_rows(rows: list[dict]) -> tuple[list[dict], bool]:
+    """
+    回傳 (current_rows, uncertain)
+    uncertain=True 表示無法完全判定，應提示「包含歷史持分資料」。
+    """
+    if not rows:
+        return [], True
+
+    # 1) 先排除已售出
+    active = [r for r in rows if _safe_int(r.get('is_sold'), 0) != 1]
+    pool = active if active else rows
+    uncertain = not bool(active)
+
+    # 2) 同地號多筆，取 reg_date/reg_seq/updated 最新批次
+    top_key = max(_row_current_priority_key(r) for r in pool)
+    anchors = [r for r in pool if _row_current_priority_key(r) == top_key]
+    anchor = anchors[0]
+    current = _rows_same_registration_group(pool, anchor)
+    if not current:
+        return _dedupe_rows_keep_latest_owner_share(pool), True
+
+    # 3) 同批次按 owner 去重，保留每位最新一筆
+    return _dedupe_rows_keep_latest_owner_share(current), uncertain
+
+def _dedupe_rows_keep_latest_owner_share(rows: list[dict]) -> list[dict]:
+    """
+    同地號查詢時保留「每位持分人」最新一筆：
+    - 不能只用 land_match_key，否則不同 owner 會被覆蓋
+    - 先按 reg_date/source_row 排序後，第一筆視為最新
+    """
+    seen: dict[str, dict] = {}
+    for r in rows:
+        land_key = (r.get('land_match_key') or '').strip()
+        owner_key = _owner_dedupe_key(r)
+        dedupe_key = f'{land_key}|{owner_key}'
+        if dedupe_key not in seen:
+            seen[dedupe_key] = r
+    return list(seen.values())
+
+def _parse_cadastral_query_args(args: list[str]) -> tuple[str, str, str]:
+    """
+    解析 /q /query 的地籍輸入：
+      /q 內興段 92
+      /q 拔子林 170-25
+      /q 竹圍段 拔子林小段 170-25
+      /q 92
+    回傳 (section_hint, sub_section_hint, land_raw)
+    """
+    land_idx = -1
+    for i, token in enumerate(args):
+        if _looks_like_land_no(token):
+            land_idx = i
+    if land_idx < 0:
+        return '', '', ''
+
+    land_raw = args[land_idx]
+    prefix = [t for t in args[:land_idx] if t]
+    section_hint = ''
+    sub_section_hint = ''
+
+    if len(prefix) == 1:
+        t = prefix[0].strip()
+        if '段' in t and '小段' not in t:
+            section_hint = t
+        else:
+            sub_section_hint = _clean_sub_section_hint(t)
+    elif len(prefix) >= 2:
+        section_hint = prefix[0].strip()
+        sub_section_hint = _clean_sub_section_hint(prefix[1].strip())
+
+    return section_hint, sub_section_hint, land_raw
 
 
 def query_dispatch(args: list[str], user_id: str) -> str:
@@ -229,48 +431,52 @@ def query_dispatch(args: list[str], user_id: str) -> str:
     con = sqlite3.connect(MASTER_DB, timeout=10)
     con.row_factory = sqlite3.Row
 
-    # ── 地號（含可選地段）：第一 token 無數字視為地段 hint
-    section_hint = ''
-    land_raw = ''
-    if not re.search(r'\d', args[0]):
-        # 第一 token 是純文字 → 地段 hint，第二 token 是地號
-        if len(args) >= 2 and _looks_like_land_no(args[1]):
-            section_hint = args[0]
-            land_raw = args[1]
-    elif _looks_like_land_no(args[0]):
-        land_raw = args[0]
+    # ── 地籍查詢：段名／小段／地號組合
+    section_hint, sub_section_hint, land_raw = _parse_cadastral_query_args(args)
 
     if land_raw:
         norm_no = normalize_land_no(land_raw)
         if norm_no:
+            sql = """
+                SELECT * FROM land_master
+                WHERE normalized_land_no = ?
+            """
+            vals = [norm_no]
             if section_hint:
-                rows = con.execute("""
-                    SELECT * FROM land_master
-                    WHERE normalized_land_no = ?
-                      AND (normalized_section LIKE ? OR section_raw LIKE ?)
-                    ORDER BY reg_date DESC, source_row DESC
-                """, (norm_no, f'%{section_hint}%', f'%{section_hint}%')).fetchall()
-            else:
-                rows = con.execute("""
-                    SELECT * FROM land_master
-                    WHERE normalized_land_no = ?
-                    ORDER BY reg_date DESC, source_row DESC
-                """, (norm_no,)).fetchall()
+                sql += " AND (normalized_section LIKE ? OR section_raw LIKE ?)"
+                vals.extend([f'%{section_hint}%', f'%{section_hint}%'])
+            if sub_section_hint:
+                sql += " AND (sub_section LIKE ? OR normalized_section LIKE ?)"
+                vals.extend([f'%{sub_section_hint}%', f'%{sub_section_hint}%'])
+            sql += " ORDER BY reg_date DESC, source_row DESC"
+            rows = con.execute(sql, vals).fetchall()
             con.close()
             rows = [dict(r) for r in rows]
             log_query(user_id, 'land_no', raw, len(rows))
             if not rows:
-                return f'找不到地號 {norm_no}。'
-            # 同地號取每個 land_match_key 最新一筆
-            seen_lmk: dict[str, dict] = {}
-            for r in rows:
-                lmk = r.get('land_match_key') or ''
-                if lmk not in seen_lmk:
-                    seen_lmk[lmk] = r
-            latest_rows = list(seen_lmk.values())
+                cond = []
+                if section_hint:
+                    cond.append(f'段名 {section_hint}')
+                if sub_section_hint:
+                    cond.append(f'小段 {sub_section_hint}')
+                cond_text = f"（{'、'.join(cond)}）" if cond else ''
+                return f'找不到地號 {norm_no}{cond_text}。'
+            latest_rows, uncertain = _pick_current_owner_rows(rows)
             if len(latest_rows) == 1:
-                return format_record(latest_rows[0])
-            return format_candidates(latest_rows, f'地號 {norm_no}')
+                body = format_record(latest_rows[0])
+                if uncertain:
+                    return f'⚠️ 以下包含歷史持分資料\n\n{body}'
+                return body
+            cond = []
+            if section_hint:
+                cond.append(f'段名 {section_hint}')
+            if sub_section_hint:
+                cond.append(f'小段 {sub_section_hint}')
+            hint = f"地號 {norm_no}" + (f" / {' / '.join(cond)}" if cond else '')
+            body = format_candidates(latest_rows, hint)
+            if uncertain:
+                return f'⚠️ 以下包含歷史持分資料\n\n{body}'
+            return body
 
     # ── 姓名查詢（純中文 or 2-4 字無數字）
     if re.match(r'^[一-鿿]{2,6}$', raw.replace(' ', '')):
@@ -566,18 +772,34 @@ def parse_land_no_args(args: list[str]) -> tuple[str, str, list[str]]:
     return section_hint, land_raw, rest
 
 
+_WHITELISTED_CMDS = {
+    '/whoami', '/query', '/note', '/phone', '/sold',
+    '/history', '/owner', '/realprice', '/rank',
+    '/start', '/help',
+}
+_ALIAS = {
+    '/q': '/query', '/n': '/note', '/p': '/phone',
+    '/s': '/sold',  '/h': '/history', '/o': '/owner',
+}
+
+
 def dispatch(text: str, user_id: str) -> str:
     parts = text.strip().split()
     if not parts:
         return help_text()
+
     cmd = parts[0].lower()
 
     # alias 展開：短指令 → 完整指令
-    _ALIAS = {'/q': '/query', '/n': '/note', '/p': '/phone',
-              '/s': '/sold',  '/h': '/history', '/o': '/owner'}
     if cmd in _ALIAS:
         cmd = _ALIAS[cmd]
         parts = [cmd] + parts[1:]
+
+    # slash command 白名單：不在白名單一律回未知指令，不走自然語言
+    if cmd.startswith('/') and cmd not in _WHITELISTED_CMDS:
+        return (f'❌ 未知指令：{cmd}\n\n可用指令：\n'
+                f'/query 地號或關鍵字\n/note 地號 備註\n/phone 地號 電話\n'
+                f'/sold 地號\n/history 地號\n/owner 姓名\n/whoami')
 
     # /whoami
     if cmd == '/whoami':
@@ -629,10 +851,14 @@ def dispatch(text: str, user_id: str) -> str:
             return '用法：/owner 姓名'
         return owner_dispatch(parts[1:], user_id)
 
-    if cmd == '/start' or cmd == '/help':
+    if cmd in ('/start', '/help'):
         return help_text()
 
-    return f'未知指令：{cmd}\n{help_text()}'
+    # 白名單內但尚未整併的指令
+    if cmd in ('/realprice', '/rank'):
+        return f'⚠️ {cmd} 尚未整併至新系統，功能暫不可用。'
+
+    return f'❌ 未知指令：{cmd}\n{help_text()}'
 
 
 def _handle_write(land_raw: str, section_hint: str,
@@ -696,6 +922,7 @@ class LandMasterBot:
 
         self.offset = 0
         self.base = f'https://api.telegram.org/bot{self.token}'
+        self.user_states: dict[str, str] = {}
 
     def api(self, method: str, params: dict = None) -> dict:
         url  = f'{self.base}/{method}'
@@ -708,7 +935,11 @@ class LandMasterBot:
     def send(self, chat_id, text: str):
         for chunk in self._split(text):
             try:
-                self.api('sendMessage', {'chat_id': chat_id, 'text': chunk})
+                self.api('sendMessage', {
+                    'chat_id': chat_id,
+                    'text': chunk,
+                    'reply_markup': REPLY_KEYBOARD,
+                })
             except Exception as e:
                 print(f'send error: {e}')
 
@@ -733,6 +964,18 @@ class LandMasterBot:
         user_id = str(msg.get('from', {}).get('id', ''))
         text    = msg['text'].strip()
 
+        # Reply Keyboard 快捷按鈕映射
+        if text == '地主查詢':
+            self.user_states[user_id] = 'owner_query'
+            self.send(chat_id, '請輸入地主姓名、地號或關鍵字，例如：葉美蓮')
+            return
+        if text == '實價查詢':
+            self.user_states[user_id] = 'realprice_query'
+            self.send(chat_id, '請輸入區域，例如：大園區近半年')
+            return
+        if text in QUICK_TEXT_TO_CMD:
+            text = QUICK_TEXT_TO_CMD[text]
+
         # /whoami 不需白名單
         if text.lower().startswith('/whoami'):
             self.send(chat_id, f'🪪 你的 Telegram user_id：{user_id}')
@@ -742,6 +985,44 @@ class LandMasterBot:
         if self.allowed and user_id not in self.allowed:
             self.send(chat_id, '未授權使用')
             print(f'[BLOCKED] user_id={user_id} text={text!r}')
+            return
+
+        # 若有按鈕狀態，下一則非 / 文字按狀態分流，完成後清除
+        state = self.user_states.get(user_id, '')
+        if state and not text.startswith('/'):
+            try:
+                if state == 'owner_query':
+                    reply = query_dispatch(text.split(), user_id)
+                    self.send(chat_id, reply)
+                elif state == 'realprice_query':
+                    from telegram_query_api import make_reply
+                    reply, _, _, _, _ = make_reply(text)
+                    if isinstance(reply, str) and reply.strip():
+                        self.send(chat_id, reply)
+                    else:
+                        self.send(chat_id, '查無符合的實價登錄資料')
+                else:
+                    self.send(chat_id, '查詢狀態錯誤，請重新點選按鈕。')
+            except Exception:
+                if state == 'owner_query':
+                    self.send(chat_id, '地主查詢發生錯誤，請稍後再試')
+                else:
+                    self.send(chat_id, '實價查詢發生錯誤，請稍後再試')
+            finally:
+                self.user_states.pop(user_id, None)
+            return
+
+        # 非 / 文字：只走實價自然語言查詢，回覆一次後立即結束
+        if not text.startswith('/'):
+            try:
+                from telegram_query_api import make_reply
+                reply, _, _, _, _ = make_reply(text)
+                if isinstance(reply, str) and reply.strip():
+                    self.send(chat_id, reply)
+                else:
+                    self.send(chat_id, '查無符合的實價登錄資料')
+            except Exception:
+                self.send(chat_id, '實價查詢發生錯誤，請稍後再試')
             return
 
         reply = dispatch(text, user_id)
