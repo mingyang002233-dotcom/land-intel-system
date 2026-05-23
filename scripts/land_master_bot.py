@@ -772,6 +772,46 @@ def parse_land_no_args(args: list[str]) -> tuple[str, str, list[str]]:
     return section_hint, land_raw, rest
 
 
+_QUERY_API_URL = 'http://127.0.0.1:8000/query'
+
+_LEGACY_SCRIPT_DIR = Path('/Users/xiaomingyang/Desktop/:Users:mingyang:land-ai:/land-intel-system/scripts')
+
+
+def _call_query_api(text: str) -> str:
+    """POST to telegram_query_api.py /query，回傳回覆文字。"""
+    import json as _json
+    import urllib.request as _req
+    payload = _json.dumps({'text': text}).encode()
+    request = _req.Request(
+        _QUERY_API_URL,
+        data=payload,
+        headers={'Content-Type': 'application/json'},
+    )
+    try:
+        with _req.urlopen(request, timeout=10) as resp:
+            data = _json.loads(resp.read())
+            return data.get('reply') or '查無結果'
+    except Exception as e:
+        return f'實價查詢暫時無法使用：{e}'
+
+
+def _call_rank(text: str) -> str:
+    """呼叫舊系統 build_ranking / format_ranking，回傳排行文字。"""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(_LEGACY_SCRIPT_DIR))
+        from query_land import load_config, parse_natural_query, build_ranking, format_ranking
+        config = load_config()
+        params, _ = parse_natural_query(text, config)
+        legacy_db = _LEGACY_SCRIPT_DIR.parent / 'db' / 'land_intel.db'
+        rows = build_ranking(params, db_path=str(legacy_db))
+        if not rows:
+            return f'查無 {text} 的排行資料'
+        return format_ranking(rows, params)
+    except Exception as e:
+        return f'排行查詢暫時無法使用：{e}'
+
+
 _WHITELISTED_CMDS = {
     '/whoami', '/query', '/note', '/phone', '/sold',
     '/history', '/owner', '/realprice', '/rank',
@@ -854,9 +894,19 @@ def dispatch(text: str, user_id: str) -> str:
     if cmd in ('/start', '/help'):
         return help_text()
 
-    # 白名單內但尚未整併的指令
-    if cmd in ('/realprice', '/rank'):
-        return f'⚠️ {cmd} 尚未整併至新系統，功能暫不可用。'
+    # /realprice 區域 → 透過 HTTP 呼叫 telegram_query_api.py
+    if cmd == '/realprice':
+        query_text = ' '.join(parts[1:]).strip()
+        if not query_text:
+            return '用法：/realprice 區域\n例：/realprice 大園'
+        return _call_query_api(query_text)
+
+    # /rank 區域 → 直接呼叫 build_ranking（telegram_query_api 未暴露此端點）
+    if cmd == '/rank':
+        query_text = ' '.join(parts[1:]).strip()
+        if not query_text:
+            return '用法：/rank 區域\n例：/rank 桃園'
+        return _call_rank(query_text)
 
     return f'❌ 未知指令：{cmd}\n{help_text()}'
 
