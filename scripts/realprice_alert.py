@@ -473,6 +473,202 @@ def reconcile_realprice_alerts(dry_run: bool = False) -> dict:
     return {'checked': checked, 'marked': marked, 'skipped': skipped, 'dry_run': dry_run}
 
 
+def reconcile_sold_status(dry_run: bool = False) -> dict:
+    """
+    回溯修正舊地主的 is_sold 狀態。
+
+    ══ 適用場景 ══
+    bulk import（import_land_master.py）匯入歷史資料後，未跑 process_land_transcripts.py
+    的 diff 邏輯，導致舊地主 is_sold 仍為 0，Excel 未反灰。
+
+    ══ 判定規則（保守，只標確定已售出者）══
+    對每個地號：
+      1. 找出最早的 買賣 事件日期（earliest_buysel_date）
+      2. 凡 reg_reason ≠ '買賣'（即 贈與/繼承/總登記/分割繼承 等前手）
+         且 reg_date < earliest_buysel_date（或 reg_date 為空）
+         且 is_sold = 0
+         → 標記為已售（is_sold=1, 已售出=已售）
+
+    ══ 明確不動的記錄 ══
+    - reg_reason = '買賣' 的記錄（買賣本身即為現任或歷史購入方，不自動標售）
+    - reg_date >= earliest_buysel_date 的記錄（可能是買賣後的新繼承/贈與）
+
+    ══ 影響範圍 ══
+    - land_master.db: is_sold, sys_note 更新
+    - 老蕭LAND_MASTER.xlsx: 已售出欄 = '已售'
+    - 執行後須呼叫 reformat_and_sort_master() 更新顏色（此函數會自動呼叫）
+
+    回傳：
+      { 'updated_db': int, 'updated_excel': int, 'parcels': int, 'dry_run': bool }
+    """
+    import openpyxl
+    from datetime import date as _date
+
+    MASTER_XLSX = LATEST_DIR / '老蕭LAND_MASTER.xlsx'
+    if not MASTER_XLSX.exists():
+        print(f'[reconcile_sold] 找不到 MASTER: {MASTER_XLSX}')
+        return {'updated_db': 0, 'updated_excel': 0, 'parcels': 0, 'dry_run': dry_run}
+
+    today_str = _date.today().strftime('%Y-%m-%d')
+
+    # ── Step 1: 從 DB 找出需要標已售的 rowid ──
+    con = sqlite3.connect(str(LM_DB), timeout=10)
+    con.row_factory = sqlite3.Row
+
+    # 取出所有地號的所有記錄（rowid 明確 alias 確保 sqlite3.Row 可 key 存取）
+    all_rows = [dict(r) for r in con.execute("""
+        SELECT rowid AS row_id, normalized_section, normalized_land_no,
+               owner_name, reg_date, reg_reason, is_sold, sys_note
+        FROM land_master
+        ORDER BY normalized_section, normalized_land_no, reg_date, CAST(reg_seq AS INTEGER)
+    """).fetchall()]
+
+    def _roc_to_date(s) -> '_date | None':
+        if not s: return None
+        import re as _re
+        m = _re.match(r'(\d+)年(\d+)月(\d+)日', str(s))
+        if m:
+            try: return _date(int(m.group(1)) + 1911, int(m.group(2)), int(m.group(3)))
+            except (ValueError, OverflowError): pass
+        m = _re.match(r'(\d+)/(\d+)/(\d+)', str(s))
+        if m:
+            try: return _date(int(m.group(1)) + 1911, int(m.group(2)), int(m.group(3)))
+            except (ValueError, OverflowError): pass
+        return None
+
+    # 建立 parcel → rows 索引
+    from collections import defaultdict as _dd
+    parcel_rows: dict[tuple, list] = _dd(list)
+    for r in all_rows:
+        parcel_rows[(r['normalized_section'], r['normalized_land_no'])].append(r)
+
+    to_sell_rowids: list[int] = []   # DB rowids 待標售
+    detail_log: list[str] = []
+
+    for (sec, lno), rows in parcel_rows.items():
+        # 找出此地號最早的買賣日期
+        buysel_dates = [_roc_to_date(r['reg_date']) for r in rows
+                        if (r['reg_reason'] or '').strip() == '買賣']
+        buysel_dates = [d for d in buysel_dates if d]
+        if not buysel_dates:
+            continue  # 此地號沒有任何買賣記錄，跳過
+
+        earliest_buysel = min(buysel_dates)
+
+        for r in rows:
+            if r['is_sold']:
+                continue  # 已標售，跳過
+            reason = (r['reg_reason'] or '').strip()
+            if reason == '買賣':
+                continue  # 買賣記錄本身不自動標售
+            reg_dt = _roc_to_date(r['reg_date'])
+            # NULL 日期 or 日期早於最早買賣 → 前手賣方
+            if reg_dt is None or reg_dt < earliest_buysel:
+                to_sell_rowids.append(r['row_id'])
+                detail_log.append(
+                    f'  {"DRY" if dry_run else "OK"}  rowid={r["row_id"]:6d}  '
+                    f'{sec} {lno}  {r["owner_name"]}  {r["reg_reason"]}  '
+                    f'reg={r["reg_date"] or "NULL"}  earliest_buysel={earliest_buysel}'
+                )
+
+    parcels_affected = len({
+        (r['normalized_section'], r['normalized_land_no'])
+        for r in all_rows if r['row_id'] in set(to_sell_rowids)
+    })
+
+    print(f'\n[reconcile_sold] 找到需標已售：{len(to_sell_rowids)} 筆 / {parcels_affected} 個地號')
+    for line in detail_log[:50]:
+        print(line)
+    if len(detail_log) > 50:
+        print(f'  ... 另 {len(detail_log) - 50} 筆省略 ...')
+
+    updated_db = 0
+    if not dry_run and to_sell_rowids:
+        for rid in to_sell_rowids:
+            con.execute("""
+                UPDATE land_master
+                SET is_sold = 1,
+                    sys_note = COALESCE(sys_note || ' | ', '') || ?
+                WHERE rowid = ?
+            """, (f'reconcile_sold {today_str}', rid))
+        con.commit()
+        updated_db = len(to_sell_rowids)
+        print(f'[reconcile_sold] SQLite 已更新 {updated_db} 筆 is_sold=1')
+
+    con.close()
+
+    # ── Step 2: 更新 Excel 已售出欄 ──
+    sell_owners: dict[tuple[str, str], set[str]] = _dd(set)
+    for r in all_rows:
+        if r['row_id'] in set(to_sell_rowids):
+            sell_owners[(r['normalized_section'], r['normalized_land_no'])].add(
+                str(r['owner_name'] or ''))
+
+    wb = openpyxl.load_workbook(str(MASTER_XLSX), read_only=False, data_only=True)
+    ws = wb.active
+    headers_xl = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+
+    def _col(name):
+        try: return headers_xl.index(name) + 1
+        except ValueError: return None
+
+    sec_c    = _col('地段')
+    no_c     = _col('地號')
+    owner_c  = _col('所有權人')
+    sold_c   = _col('已售出')
+
+    if not (sec_c and no_c and owner_c and sold_c):
+        print(f'[reconcile_sold] Excel 欄位缺失，跳過 Excel 更新')
+        wb.close()
+        return {'updated_db': updated_db, 'updated_excel': 0,
+                'parcels': parcels_affected, 'dry_run': dry_run}
+
+    updated_excel = 0
+
+    for row_num in range(2, ws.max_row + 1):
+        raw_sec   = str(ws.cell(row_num, sec_c).value or '').strip()
+        raw_no    = str(ws.cell(row_num, no_c).value or '').strip()
+        raw_owner = str(ws.cell(row_num, owner_c).value or '').strip()
+        already_sold = str(ws.cell(row_num, sold_c).value or '').strip()
+
+        if '已售' in already_sold:
+            continue
+
+        # 標準化 section（移除括號部分）
+        n_sec = re.sub(r'\([^)]*\)', '', raw_sec).strip()
+        n_no  = norm_land_no(raw_no)
+
+        # 找匹配的 sell_owners
+        matched = False
+        for (db_sec, db_no), owners in sell_owners.items():
+            if db_no != n_no:
+                continue
+            if n_sec in db_sec or db_sec in n_sec or n_sec == db_sec:
+                if raw_owner in owners:
+                    matched = True
+                    break
+
+        if matched:
+            if not dry_run:
+                ws.cell(row_num, sold_c).value = '已售'
+            updated_excel += 1
+            print(f'  {"DRY" if dry_run else "XL"} row {row_num:5d}  '
+                  f'{raw_sec} {raw_no}  {raw_owner} → 已售')
+
+    if updated_excel and not dry_run:
+        wb.save(str(MASTER_XLSX))
+        print(f'[reconcile_sold] Excel 已儲存：{MASTER_XLSX}')
+        print(f'[reconcile_sold] Excel 標已售：{updated_excel} 列')
+    wb.close()
+
+    return {
+        'updated_db':    updated_db,
+        'updated_excel': updated_excel,
+        'parcels':       parcels_affected,
+        'dry_run':       dry_run,
+    }
+
+
 # ── Excel 更新 ────────────────────────────────────────────────────
 
 def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None]:
@@ -712,10 +908,13 @@ def main():
     parser.add_argument('--send-all',  action='store_true', help='逐筆推播（確認 Excel 後再用）')
     parser.add_argument('--reconcile', action='store_true',
                         help='回溯比對：對照現有 DB 將實價提醒報表中已反映的地號標為已調閱')
+    parser.add_argument('--reconcile-sold', action='store_true',
+                        help='回溯標已售：將 bulk import 舊地主補標 is_sold=1 + Excel 反灰')
     args = parser.parse_args()
-    dry_run   = args.dry_run
-    send_all  = args.send_all
-    reconcile = args.reconcile
+    dry_run        = args.dry_run
+    send_all       = args.send_all
+    reconcile      = args.reconcile
+    reconcile_sold = args.reconcile_sold
 
     if send_all and dry_run:
         print('--dry-run 與 --send-all 不可同時使用')
@@ -738,6 +937,40 @@ def main():
         if dry_run:
             print(f'\n確認後執行（正式寫入）：')
             print(f'  python3 scripts/realprice_alert.py --reconcile')
+        return
+
+    # ── reconcile-sold 模式：補標已售 + 重新套用 Excel 格式 ──
+    if reconcile_sold:
+        mode = 'DRY-RUN' if dry_run else '正式執行'
+        print(f'[ {mode} ] realprice_alert.py --reconcile-sold')
+        print(f'時間：{datetime.now().strftime("%Y-%m-%d %H:%M")}')
+        print(f'DB  ：{LM_DB}')
+        print()
+        result = reconcile_sold_status(dry_run=dry_run)
+        print()
+        print(f'── 結果 ──')
+        print(f'  影響地號數      ：{result["parcels"]}')
+        print(f'  SQLite 標已售   ：{result["updated_db"]}')
+        print(f'  Excel 標已售    ：{result["updated_excel"]}')
+        if not dry_run and result['updated_excel']:
+            print(f'\n[reformat] 重新套用格式與排序…')
+            try:
+                import importlib.util, sys as _sys
+                spec = importlib.util.spec_from_file_location(
+                    'plt', str(PROJECT_ROOT / 'scripts' / 'process_land_transcripts.py'))
+                plt = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(plt)
+                fmt = plt.reformat_and_sort_master(dry_run=False)
+                print(f'  已售灰色列      ：{fmt["sold_grey"]}')
+                print(f'  近半年黃色列    ：{fmt["recent_yellow"]}')
+                print(f'  排序完成        ：{fmt["sorted"]}')
+                print(f'  耗時            ：{fmt["elapsed"]:.1f}s')
+            except Exception as e:
+                print(f'[reformat] 失敗：{e}')
+                print('請手動執行：python3 scripts/process_land_transcripts.py --reformat')
+        elif dry_run:
+            print(f'\n確認後執行（正式寫入 + 重新格式化）：')
+            print(f'  python3 scripts/realprice_alert.py --reconcile-sold')
         return
 
     mode = 'DRY-RUN' if dry_run else ('逐筆推播' if send_all else '正式執行（摘要推播）')
