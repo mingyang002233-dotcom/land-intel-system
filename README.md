@@ -6,11 +6,18 @@
 
 ```bash
 # 調閱謄本後下載 YAML，download_watcher 自動搬入 電傳解析/
-# 執行 ingestion
+# 執行 ingestion（自動同步 MASTER + 移除實價提醒報表已調閱列）
 python3 scripts/process_land_transcripts.py
 
-# 實價提醒回溯比對
+# 實價提醒回溯比對（bulk import 後使用）
 python3 scripts/realprice_alert.py --reconcile
+
+# 人工已確認（免調閱）：從提醒報表移除 + 寫 MASTER 備註
+python3 scripts/realprice_alert.py --manual-confirm \
+    --section "地段" --land-no "0000-0000" [--reason "原因"]
+
+# 補標舊地主已售 + 重新格式化（bulk import 後使用）
+python3 scripts/realprice_alert.py --reconcile-sold
 
 # 查看背景服務狀態
 launchctl list | grep landmaster
@@ -20,7 +27,7 @@ launchctl list | grep landmaster
 
 詳細架構、Pipeline 流程、資料夾規則、欄位定義、業務規則，請見：
 
-**[docs/PIPELINE_SOP.md](docs/PIPELINE_SOP.md)** — 正式 Pipeline SOP（v5.2）
+**[docs/PIPELINE_SOP.md](docs/PIPELINE_SOP.md)** — 正式 Pipeline SOP（v5.4）
 
 ## 主要 Scripts
 

@@ -910,6 +910,117 @@ def send_all_alerts(alerts: list[dict], dry_run: bool) -> int:
     print(f'[Telegram] 逐筆推播完成，成功 {sent} 則')
     return sent
 
+
+def manual_confirm_alert(section: str, land_no: str,
+                         reason: str = '', dry_run: bool = False) -> dict:
+    """
+    人工已確認（免調閱）操作。
+
+    ══ 正式規則 ══
+    實價提醒報表 = action queue，只留待調閱事項。
+    人工判斷不需調閱（贈與/繼承/家族移轉/已知地主/不值得開發/資料已足夠）時，
+    執行此操作：
+      a. 從實價提醒報表移除對應列
+      b. 在 MASTER 清冊 sys_note（系統處理備註）追加「人工已確認（免調閱）」
+
+    用法：
+      python3 scripts/realprice_alert.py --manual-confirm \\
+          --section 和平段 --land-no 0218-0002 [--reason '家族贈與不需調閱']
+
+    回傳：
+      { 'report_removed': int, 'master_noted': int, 'dry_run': bool }
+    """
+    import openpyxl
+
+    MASTER_XLSX = LATEST_DIR / '老蕭LAND_MASTER.xlsx'
+    today_str   = date.today().strftime('%Y-%m-%d')
+    note_text   = f'人工已確認（免調閱）{today_str}'
+    if reason:
+        note_text += f'：{reason}'
+
+    # ── 標準化輸入 ──
+    n_sec = re.sub(r'\([^)]*\)', '', section).strip()
+    n_no  = norm_land_no(land_no)
+
+    print(f'[manual-confirm] 地號：{section} {land_no}')
+    print(f'[manual-confirm] 標準化：{n_sec!r}  {n_no!r}')
+    print(f'[manual-confirm] 備註：{note_text}')
+    print()
+
+    # ── Step 1: 從實價提醒報表移除 ──
+    report_removed = 0
+    if LATEST_REPORT.exists():
+        wb_r = openpyxl.load_workbook(str(LATEST_REPORT))
+        ws_r = wb_r.active
+        hdrs_r = [ws_r.cell(1, c).value for c in range(1, ws_r.max_column + 1)]
+        sec_c = hdrs_r.index('地段') + 1 if '地段' in hdrs_r else None
+        no_c  = hdrs_r.index('地號') + 1 if '地號' in hdrs_r else None
+
+        rows_to_del = []
+        if sec_c and no_c:
+            for row_num in range(2, ws_r.max_row + 1):
+                raw_sec = str(ws_r.cell(row_num, sec_c).value or '').strip()
+                raw_no  = str(ws_r.cell(row_num, no_c).value or '').strip()
+                rs = re.sub(r'\([^)]*\)', '', raw_sec).strip()
+                rn = norm_land_no(raw_no)
+                if (rs == n_sec or n_sec in rs or rs in n_sec) and rn == n_no:
+                    rows_to_del.append(row_num)
+                    print(f'  [{"DRY" if dry_run else "DEL"}] 報表 row {row_num}  {raw_sec} {raw_no}')
+
+        report_removed = len(rows_to_del)
+        if rows_to_del and not dry_run:
+            for r in sorted(rows_to_del, reverse=True):
+                ws_r.delete_rows(r)
+            wb_r.save(str(LATEST_REPORT))
+            print(f'  → 已從實價提醒報表移除 {report_removed} 列')
+        wb_r.close()
+    else:
+        print(f'  [WARN] 找不到報表：{LATEST_REPORT}')
+
+    # ── Step 2: 寫入 MASTER sys_note ──
+    master_noted = 0
+    if MASTER_XLSX.exists():
+        wb_m = openpyxl.load_workbook(str(MASTER_XLSX), read_only=False, data_only=True)
+        ws_m = wb_m.active
+        hdrs_m = [ws_m.cell(1, c).value for c in range(1, ws_m.max_column + 1)]
+
+        def _mc(name):
+            return hdrs_m.index(name) + 1 if name in hdrs_m else None
+
+        msec_c  = _mc('地段')
+        mno_c   = _mc('地號')
+        mnote_c = _mc('系統處理備註')
+
+        if msec_c and mno_c and mnote_c:
+            for row_num in range(2, ws_m.max_row + 1):
+                raw_sec = str(ws_m.cell(row_num, msec_c).value or '').strip()
+                raw_no  = str(ws_m.cell(row_num, mno_c).value or '').strip()
+                rs = re.sub(r'\([^)]*\)', '', raw_sec).strip()
+                rn = norm_land_no(raw_no)
+                if (rs == n_sec or n_sec in rs or rs in n_sec) and rn == n_no:
+                    cur = str(ws_m.cell(row_num, mnote_c).value or '').strip()
+                    new_note = (cur + ' | ' + note_text) if cur else note_text
+                    if not dry_run:
+                        ws_m.cell(row_num, mnote_c).value = new_note
+                    master_noted += 1
+                    owner = ws_m.cell(row_num, hdrs_m.index('所有權人') + 1).value if '所有權人' in hdrs_m else ''
+                    print(f'  [{"DRY" if dry_run else "NOTE"}] MASTER row {row_num}  {raw_sec} {raw_no}  {owner}')
+
+        if master_noted and not dry_run:
+            wb_m.save(str(MASTER_XLSX))
+            print(f'  → MASTER 已寫入備註 {master_noted} 列：{note_text}')
+        wb_m.close()
+    else:
+        print(f'  [WARN] 找不到 MASTER：{MASTER_XLSX}')
+
+    print()
+    print(f'── 結果 ──')
+    print(f'  報表移除列數      ：{report_removed}')
+    print(f'  MASTER 備註列數   ：{master_noted}')
+
+    return {'report_removed': report_removed, 'master_noted': master_noted, 'dry_run': dry_run}
+
+
 # ── 主程式 ────────────────────────────────────────────────────────
 
 def main():
@@ -920,11 +1031,17 @@ def main():
                         help='回溯比對：對照現有 DB 將已反映的地號直接從實價提醒報表移除')
     parser.add_argument('--reconcile-sold', action='store_true',
                         help='回溯標已售：將 bulk import 舊地主補標 is_sold=1 + Excel 反灰')
+    parser.add_argument('--manual-confirm', action='store_true',
+                        help='人工已確認（免調閱）：從提醒報表移除 + 寫入 MASTER sys_note')
+    parser.add_argument('--section',  default='', help='地段（配合 --manual-confirm）')
+    parser.add_argument('--land-no',  default='', help='地號（配合 --manual-confirm）')
+    parser.add_argument('--reason',   default='', help='人工確認原因（可選）')
     args = parser.parse_args()
     dry_run        = args.dry_run
     send_all       = args.send_all
     reconcile      = args.reconcile
     reconcile_sold = args.reconcile_sold
+    manual_confirm = args.manual_confirm
 
     if send_all and dry_run:
         print('--dry-run 與 --send-all 不可同時使用')
@@ -981,6 +1098,28 @@ def main():
         elif dry_run:
             print(f'\n確認後執行（正式寫入 + 重新格式化）：')
             print(f'  python3 scripts/realprice_alert.py --reconcile-sold')
+        return
+
+    # ── manual-confirm 模式：人工已確認（免調閱）──
+    if manual_confirm:
+        if not args.section or not args.land_no:
+            print('錯誤：--manual-confirm 必須同時指定 --section 和 --land-no')
+            sys.exit(1)
+        mode = 'DRY-RUN' if dry_run else '正式執行'
+        print(f'[ {mode} ] realprice_alert.py --manual-confirm')
+        print(f'時間：{datetime.now().strftime("%Y-%m-%d %H:%M")}')
+        print()
+        manual_confirm_alert(
+            section  = args.section,
+            land_no  = args.land_no,
+            reason   = args.reason,
+            dry_run  = dry_run,
+        )
+        if dry_run:
+            print(f'\n確認後執行（正式移除 + 寫入備註）：')
+            print(f'  python3 scripts/realprice_alert.py --manual-confirm'
+                  f' --section "{args.section}" --land-no "{args.land_no}"'
+                  + (f' --reason "{args.reason}"' if args.reason else ''))
         return
 
     mode = 'DRY-RUN' if dry_run else ('逐筆推播' if send_all else '正式執行（摘要推播）')

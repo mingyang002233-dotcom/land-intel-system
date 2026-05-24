@@ -1,6 +1,6 @@
 # Land Intel System — 正式 Pipeline SOP
 
-> 版本：v5.3（2026-05-24）  
+> 版本：v5.4（2026-05-24）  
 > 此文件為 auto-compact / 新對話重啟後的「制度化記憶」。  
 > 讀完此文件即可理解系統現況，無需翻歷史對話。
 
@@ -157,12 +157,15 @@ event_key = SHA256(
 
 ---
 
-## 九、實價提醒報表核心規則（正式鎖定 v5.3）
+## 九、實價提醒報表核心規則（正式鎖定 v5.4）
 
 ### 定位
 
-**實價提醒報表 = 尚未調閱的待辦清單**，只保留現在仍需調閱謄本的地號。  
-歷史資料（已調閱、已反映）保存於 SQLite + MASTER 清冊，**不留在報表中**。
+> **實價提醒報表 = action queue（待處理工作清單），不是歷史 log。**
+
+只保留「現在還需要我去決定或行動的地號」。  
+已處理的案件，無論透過哪種方式結案，**一律直接刪除，不留狀態列**。  
+歷史資料保存於 SQLite + MASTER 清冊。
 
 ### 觸發條件（會進入報表）
 
@@ -175,48 +178,62 @@ event_key = SHA256(
 - 繼承、贈與、地目調整、分割、合併
 - → 這些屬於未來「他項權利情報」或「地主金融壓力」模組
 
-### 移除條件（從報表刪除）
+### 報表狀態：只剩一種
 
-以下情況直接 **刪除該列**，不留任何標記狀態：
+| 建議動作欄值 | 意義 |
+|-------------|------|
+| `請確認此地號是否已有地主異動` | 標準待調閱 |
+| `近期已更新，請人工確認` | 90 天內有 MASTER 更新，建議複確認 |
 
-1. foundi 電傳成功解析（`reg_reason='買賣'`）→ `mark_realprice_processed()` 刪除
-2. `reconcile_realprice_alerts()` 判定「已反映」→ 直接刪除
-3. `reconcile_realprice_alerts()` 遇到舊有「已調閱」殘留列 → 一併清除
+其他任何狀態（已調閱、已反映、reconcile 完成）均不留在報表。
 
-### is_reflected_in_master() 核心邏輯
+### 三種結案路徑（均直接刪列）
+
+#### 路徑 A：foundi 電傳解析成功
+
+```
+python3 scripts/process_land_transcripts.py
+```
+
+`mark_realprice_processed()` 在 ingestion 後自動執行：
+- 條件：`reg_reason='買賣'` 且成功寫入 SQLite
+- 動作：`delete_rows` 對應地號的所有提醒列
+- 非買賣事件（抵押、繼承等）不觸發
+
+#### 路徑 B：reconcile 自動比對（適用 bulk import 後）
+
+```bash
+python3 scripts/realprice_alert.py --reconcile --dry-run  # 預覽
+python3 scripts/realprice_alert.py --reconcile            # 正式執行
+```
+
+`reconcile_realprice_alerts()` 邏輯：
 
 ```
 「已反映」= 同地號在 DB 已存在：
   reg_reason = '買賣'
   reg_date   >= 實價成交日期（差距 ≤ 90 天）
-
-→ 代表新地主結構已存在，此地號直接從報表移除
+→ 直接 delete_rows，不寫任何標記
 ```
 
-**明確不使用**：`is_sold` / 已售出欄位  
-理由：舊清冊歷史資料很多缺乏完整已售標記。  
-「新地主是否存在」與「舊地主是否標已售」是兩件獨立的事。
+**明確不使用**：`is_sold` / 已售出欄位（舊資料常缺失，不作為判定依據）
 
-### mark_realprice_processed() 觸發條件
+#### 路徑 C：人工已確認（免調閱）
 
-1. `reg_reason = '買賣'`（電傳確認買賣事件）
-2. 成功寫入 SQLite
-3. 報表有該地號的列
-
-觸發後：直接 `delete_rows`，不寫「已調閱」欄位。  
-非買賣事件（抵押、地目等）**不**觸發，即使電傳解析成功。
-
-### reconcile_realprice_alerts() 用途
-
-批量匯入（`import_land_master.py`）後，報表不會自動更新。  
-執行 `--reconcile` 回溯比對整張報表，移除已反映地號：
+我判斷不需調閱的案件（贈與/繼承/家族移轉/已知地主/不值得開發/資料已足夠）：
 
 ```bash
-python3 scripts/realprice_alert.py --reconcile --dry-run  # 預覽（顯示將移除幾列）
-python3 scripts/realprice_alert.py --reconcile            # 正式執行（直接刪列）
+python3 scripts/realprice_alert.py --manual-confirm \
+    --section "地段名稱" --land-no "0000-0000" \
+    [--reason "原因說明"]
 ```
 
-### reconcile_sold_status() 用途
+動作：
+- a. 從實價提醒報表 `delete_rows`（即時移除）
+- b. 在 MASTER 清冊 **系統處理備註**（AC欄）追加：
+  `人工已確認（免調閱）YYYY-MM-DD：原因說明`
+
+### reconcile_sold_status() 用途（獨立 — 不影響報表）
 
 bulk import 歷史資料未跑 diff，導致舊地主 `is_sold=0`、Excel 未反灰。  
 執行 `--reconcile-sold` 補標已售並重新格式化：
@@ -227,7 +244,7 @@ python3 scripts/realprice_alert.py --reconcile-sold            # 正式執行 + 
 ```
 
 **判定規則**：`reg_reason ≠ '買賣'`（前手）且 `reg_date < 同地號最早買賣日期` → 標 `is_sold=1`。  
-`reg_reason='買賣'` 的記錄**永不自動標售**（買賣本身即為現任或歷史購入方）。
+`reg_reason='買賣'` 的記錄**永不自動標售**。
 
 ---
 
@@ -289,8 +306,9 @@ launchctl unload ~/Library/LaunchAgents/com.landmaster.download-watcher.plist
 | `land_master_bot.py` | Telegram bot（常駐）| LaunchAgent 管理 |
 | `update_excel_realprice.py` | 主清冊加實價比對欄 | `--dry-run` |
 | `reformat_and_sort_master()` | 全表格式化 + 排序（函數）| 由 process 自動呼叫 |
-| `reconcile_realprice_alerts()` | 回溯比對，移除已反映地號（函數）| `--reconcile` CLI |
-| `reconcile_sold_status()` | 補標 bulk import 舊地主 is_sold + reformat | `--reconcile-sold` CLI |
+| `reconcile_realprice_alerts()` | 回溯比對，移除已反映地號 | `--reconcile` |
+| `reconcile_sold_status()` | 補標 bulk import 舊地主 is_sold + reformat | `--reconcile-sold` |
+| `manual_confirm_alert()` | 人工已確認（免調閱）：刪提醒列 + 寫 MASTER 備註 | `--manual-confirm --section X --land-no Y` |
 
 ---
 
@@ -334,4 +352,4 @@ launchctl unload ~/Library/LaunchAgents/com.landmaster.download-watcher.plist
 ---
 
 *本文件應在每次架構重大變更後更新。*  
-*上次更新：2026-05-24（v5.3）*
+*上次更新：2026-05-24（v5.4）*
