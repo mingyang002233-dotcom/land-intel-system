@@ -844,18 +844,21 @@ _RP_BUYSEL_REASONS = {'買賣'}
 
 def mark_realprice_processed(all_inserted: list[dict], dry_run: bool = False) -> int:
     """
-    電傳解析成功入庫後，將實價提醒報表中對應地號標記為「已調閱電傳」。
+    電傳解析成功入庫後，將實價提醒報表中對應地號的列直接移除。
+
+    ══ 正式規則（v5.3）══
+    實價提醒報表 = 尚未調閱的待辦清單。
+    已解析電傳（買賣事件）→ 直接刪除對應列，不留「已調閱」狀態。
 
     觸發條件（三者同時成立）：
       1. reg_reason == '買賣'（買賣事件，對應實價登錄追蹤目的）
       2. 該地號成功寫入 SQLite land_master
-      3. 實價提醒報表有該地號的未處理提醒（建議動作不含「已調閱」）
+      3. 實價提醒報表有該地號的列（無論目前建議動作為何）
 
     不觸發條件：
       - 增貸、抵押權設定、他項設定、地目調整、繼承、分割等非買賣事件
-      - 這些事件不代表買賣交易，不應從實價提醒清單移出
 
-    回傳標記筆數。
+    回傳移除列數。
     """
     import openpyxl
 
@@ -877,25 +880,24 @@ def mark_realprice_processed(all_inserted: list[dict], dry_run: bool = False) ->
 
     sec_col    = col(_RP_COL_SECTION)
     no_col     = col(_RP_COL_LAND_NO)
-    action_col = col(_RP_COL_ACTION)
-    if not (sec_col and no_col and action_col):
+    if not (sec_col and no_col):
         return 0
 
-    today = datetime.now().strftime('%Y-%m-%d')
-    marked = 0
+    # 收集待刪列號（由大到小刪，避免位移）
+    rows_to_delete = []
     for r in range(2, ws.max_row + 1):
         sec = normalize_section(str(ws.cell(r, sec_col).value or ''))
         no  = normalize_land_no(str(ws.cell(r, no_col).value or ''))
         if (sec, no) in buysel_keys:
-            cur = str(ws.cell(r, action_col).value or '')
-            if '已調閱' not in cur:
-                ws.cell(r, action_col).value = f'已調閱電傳 {today}'
-                marked += 1
+            rows_to_delete.append(r)
 
-    if marked and not dry_run:
+    if rows_to_delete and not dry_run:
+        for r in sorted(rows_to_delete, reverse=True):
+            ws.delete_rows(r)
         wb.save(str(REALPRICE_REPORT))
+
     wb.close()
-    return marked
+    return len(rows_to_delete)
 
 
 # ── Excel 主清冊同步 ─────────────────────────────────────────────────────────
@@ -1405,12 +1407,12 @@ def main():
         print('\n[reformat] 重新套用格式與排序…')
         fmt_result = reformat_and_sort_master(dry_run=False)
 
-    # ── 實價提醒報表：標記已處理（只處理買賣事件）──
+    # ── 實價提醒報表：移除已處理地號（只處理買賣事件）──
     rp_marked = 0
     if all_inserted_recs and not dry_run:
         rp_marked = mark_realprice_processed(all_inserted_recs, dry_run=False)
         if rp_marked:
-            print(f'\n[實價報表] 已標記 {rp_marked} 筆為「已調閱電傳」：{REALPRICE_REPORT.name}')
+            print(f'\n[實價報表] 已從待調閱清單移除 {rp_marked} 列：{REALPRICE_REPORT.name}')
 
     print(f'\n{"─"*50}')
     if dry_run:
@@ -1458,7 +1460,7 @@ def main():
         print(f'  近半年買賣反黃列數  ：{fmt_result["recent_yellow"]}')
         print(f'  全表排序            ：{"✅" if fmt_result["sorted"] else "跳過"}')
         print(f'實價提醒報表：')
-        print(f'  標記已調閱電傳      ：{rp_marked}')
+        print(f'  從待調閱清單移除    ：{rp_marked} 列')
         print(f'系統：')
         print(f'  批次ID              ：{batch_id}')
 
