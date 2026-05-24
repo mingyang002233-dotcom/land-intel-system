@@ -60,6 +60,23 @@ trap notify_failure EXIT
   "$PYTHON" scripts/maintenance_pipeline.py
   echo ""
 
+  # Step 2b: trade_date 範圍唯讀檢查（警告用，不中斷流程）
+  echo "[Step 2b] 檢查 trade_date 異常（warning only）"
+  set +e
+  TRADE_DATE_CHECK_OUTPUT=$("$PYTHON" scripts/check_trade_date_range.py 2>&1)
+  TRADE_DATE_CHECK_STATUS=$?
+  set -e
+  echo "$TRADE_DATE_CHECK_OUTPUT"
+  if [ "$TRADE_DATE_CHECK_STATUS" -ne 0 ]; then
+    echo "[警告] trade_date 檢查腳本執行失敗，不中斷月更新。status=$TRADE_DATE_CHECK_STATUS"
+  else
+    BAD_DATE_COUNT=$(printf '%s\n' "$TRADE_DATE_CHECK_OUTPUT" | sed -n 's/^異常筆數:[[:space:]]*//p' | tr -d ',[:space:]')
+    if [ -n "${BAD_DATE_COUNT:-}" ] && [ "$BAD_DATE_COUNT" -gt 0 ] 2>/dev/null; then
+      echo "[警告] 偵測到 trade_date 異常資料 $BAD_DATE_COUNT 筆，不中斷月更新。"
+    fi
+  fi
+  echo ""
+
   # Step 3: 更新覆蓋狀態紀錄
   echo "[Step 3] 檢查更新覆蓋狀態並寫入 update_history"
   "$PYTHON" scripts/check_update_schedule.py
