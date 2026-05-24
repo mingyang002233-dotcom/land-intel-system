@@ -25,46 +25,46 @@ SQLite 更新
 - **Python** = 負責 normalize、匯入、實價比對、報表輸出
 - **Telegram** = 手機端摘要推播 + 快速回填（聯絡紀錄、狀態更新）
 
-### 正式 import 來源（唯一）
+### 正式主檔（唯一，固定命名）
 
 ```
-/Users/xiaomingyang/Desktop/excel土地資料維護/土地主清冊_正式版_20260522_郵遞區號補正版.xlsx
+/Users/xiaomingyang/Desktop/excel土地資料維護/最新完成版/老蕭LAND_MASTER.xlsx
 ```
 
-> **import_land_master.py 預設讀取此檔。不要改回舊路徑。**
+> **所有 script 唯一主檔路徑。禁止改名、禁止另存新版蓋過此檔。**
 
-**此版本特性：**
-- 148,265 列 × 24 欄，無 externalLinks，無修復提示
-- 郵遞區號已補正 7,234 筆（信心高，依地址自動補）
-- 補正紀錄：`郵遞區號補正紀錄_20260522.xlsx`
+測試用：
+```
+/Users/xiaomingyang/Desktop/excel土地資料維護/最新完成版/老蕭LAND_MASTER_TEST.xlsx
+```
 
-### 歷史備份檔案（僅保留，不再作為 import 來源）
+### 根目錄允許存在的檔案（最新完成版/）
 
 | 檔案 | 說明 |
 |------|------|
-| `土地資料維護.xlsx` | 原始檔，含舊公式與 externalLinks，僅作原始備份 |
-| `土地資料維護_backup_*.xlsx` | 系統備份，不再修改 |
-| `土地主清冊_乾淨版_20260522.xlsx` | 郵遞區號補正前的乾淨版，保留供回溯 |
-| `土地主清冊_正式版_20260522.xlsx` | 郵遞區號補正前的格式版，保留供回溯 |
-| `cleaned_preview.xlsx`（如存在） | 暫存預覽檔，不作為 import 來源 |
+| `老蕭LAND_MASTER.xlsx` | 正式主檔（唯一） |
+| `老蕭LAND_MASTER_TEST.xlsx` | 測試用（永久保留） |
+| `實價提醒報表_最新完成版.xlsx` | 最新實價報表（由 realprice_alert.py 覆寫） |
+| `backup/` | 所有備份與舊版均移入此目錄 |
+
+**命名規則：根目錄禁止出現 timestamp、copy、完成版、最新版等後綴。所有備份由 script 自動放入 backup/。**
 
 **主清冊設計原則：**
-1. 只保留 24 個核心欄位（見第一節）
+1. 只保留 27 個核心欄位 + 系統判定欄位 AB–AF（sys_status/sys_note/sys_source/sys_updated_at/sys_batch_id）
 2. 不含 externalLinks，不含舊公式，開啟無修復提示
 3. 不直接寫入實價提醒欄位
 4. 實價提醒一律輸出獨立報表（`實價提醒報表_YYYYMMDD_HHMMSS.xlsx`）
-5. import_land_master.py 預設讀取郵遞區號補正版（見上方路徑）
-6. 所有権人空白／疑似錯誤：等新謄本／電傳，不自動補
+5. 所有権人空白／疑似錯誤：等新謄本／電傳，不自動補
 
-### 檔案命名規則
+### 檔案命名規則（正式鎖定）
 
-| 類型 | 格式 | 說明 |
+| 類型 | 固定名稱 / 格式 | 說明 |
 |------|------|------|
-| 正式 import 來源 | `土地主清冊_正式版_YYYYMMDD_郵遞區號補正版.xlsx` | 每次補正後另存新版 |
-| 實價提醒報表 | `實價提醒報表_YYYYMMDD_HHMMSS.xlsx` | `realprice_alert.py` 自動輸出 |
+| 正式主檔 | `老蕭LAND_MASTER.xlsx` | 唯一，禁止改名或 timestamp |
+| 測試主檔 | `老蕭LAND_MASTER_TEST.xlsx` | 永久保留，與正式分離 |
+| 備份 | `backup/老蕭LAND_MASTER_backup_YYYYMMDD_HHMMSS.xlsx` | script 自動放入 backup/ |
+| 實價提醒報表 | `實價提醒報表_YYYYMMDD_HHMMSS.xlsx` | `realprice_alert.py` 輸出 |
 | 資料品質報表 | `資料品質檢查報表_YYYYMMDD_HHMMSS.xlsx` | `check_land_master_quality.py` 輸出 |
-| 補正紀錄 | `郵遞區號補正紀錄_YYYYMMDD.xlsx` | `apply_postal_fix.py` 輸出 |
-| 備份 | `土地資料維護_backup_*.xlsx` | 保留，不修改 |
 
 ---
 

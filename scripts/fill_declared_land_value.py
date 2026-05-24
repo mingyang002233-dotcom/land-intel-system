@@ -33,9 +33,7 @@ OUTPUT_DIR  = BASE_DIR / 'output'
 LOGS_DIR    = BASE_DIR / 'logs'
 LATEST_DIR  = BASE_DIR / '最新完成版'
 
-DEFAULT_XLSX = (LATEST_DIR / '土地主清冊_最新完成版.xlsx'
-                if (LATEST_DIR / '土地主清冊_最新完成版.xlsx').exists()
-                else INPUT_DIR / '土地主清冊_正式版_最新.xlsx')
+DEFAULT_XLSX = LATEST_DIR / '老蕭LAND_MASTER.xlsx'
 
 # ── 縣市/地區解析正則 ────────────────────────────────────────────────
 
