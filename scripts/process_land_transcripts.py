@@ -655,27 +655,51 @@ def build_tg_message(filename: str, records: list[dict],
 
 
 # ── 實價提醒報表：標記已處理 ────────────────────────────────────────────────
-
+#
+# 實價提醒報表的正確定位：
+#   = 買賣異動待調閱清單，來源為實價登錄比對結果
+#   只追蹤「買賣交易」訊號，不追蹤增貸、抵押、他項權利設定等異動
+#
+# 增貸/抵押/他項異動 → 應歸屬「他項權利情報」或「地主金融壓力」模組（未來建置）
+#
 REALPRICE_REPORT = EXCEL_DIR / '最新完成版' / '實價提醒報表_最新完成版.xlsx'
 _RP_COL_SECTION  = '地段'
 _RP_COL_LAND_NO  = '地號'
 _RP_COL_ACTION   = '建議動作'
 
+# 只有這些登記原因的電傳才代表「買賣已調閱」，可標記實價提醒已處理
+_RP_BUYSEL_REASONS = {'買賣'}
 
-def mark_realprice_processed(processed_land_keys: set[tuple], dry_run: bool = False) -> int:
+
+def mark_realprice_processed(all_inserted: list[dict], dry_run: bool = False) -> int:
     """
     電傳解析成功入庫後，將實價提醒報表中對應地號標記為「已調閱電傳」。
-    processed_land_keys: set of (normalized_section, normalized_land_no)
+
+    觸發條件（三者同時成立）：
+      1. reg_reason == '買賣'（買賣事件，對應實價登錄追蹤目的）
+      2. 該地號成功寫入 SQLite land_master
+      3. 實價提醒報表有該地號的未處理提醒（建議動作不含「已調閱」）
+
+    不觸發條件：
+      - 增貸、抵押權設定、他項設定、地目調整、繼承、分割等非買賣事件
+      - 這些事件不代表買賣交易，不應從實價提醒清單移出
+
     回傳標記筆數。
     """
     import openpyxl
-    if not REALPRICE_REPORT.exists() or not processed_land_keys:
+
+    # 只取買賣登記原因的地號
+    buysel_keys = {
+        (r['normalized_section'], r['normalized_land_no'])
+        for r in all_inserted
+        if (r.get('reg_reason') or '').strip() in _RP_BUYSEL_REASONS
+    }
+    if not REALPRICE_REPORT.exists() or not buysel_keys:
         return 0
 
     wb = openpyxl.load_workbook(str(REALPRICE_REPORT))
     ws = wb.active
 
-    # 取得欄位 index（1-based）
     headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
     def col(name):
         return headers.index(name) + 1 if name in headers else None
@@ -691,7 +715,7 @@ def mark_realprice_processed(processed_land_keys: set[tuple], dry_run: bool = Fa
     for r in range(2, ws.max_row + 1):
         sec = normalize_section(str(ws.cell(r, sec_col).value or ''))
         no  = normalize_land_no(str(ws.cell(r, no_col).value or ''))
-        if (sec, no) in processed_land_keys:
+        if (sec, no) in buysel_keys:
             cur = str(ws.cell(r, action_col).value or '')
             if '已調閱' not in cur:
                 ws.cell(r, action_col).value = f'已調閱電傳 {today}'
@@ -1205,14 +1229,10 @@ def main():
                 dry_run=dry_run
             )
 
-    # ── 實價提醒報表：標記已處理 ──
+    # ── 實價提醒報表：標記已處理（只處理買賣事件）──
     rp_marked = 0
     if all_inserted_recs and not dry_run:
-        processed_keys = {
-            (r['normalized_section'], r['normalized_land_no'])
-            for r in all_inserted_recs
-        }
-        rp_marked = mark_realprice_processed(processed_keys, dry_run=False)
+        rp_marked = mark_realprice_processed(all_inserted_recs, dry_run=False)
         if rp_marked:
             print(f'\n[實價報表] 已標記 {rp_marked} 筆為「已調閱電傳」：{REALPRICE_REPORT.name}')
 
