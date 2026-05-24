@@ -317,6 +317,128 @@ def build_alerts(lm_idx: dict, lt_rows: list[dict]) -> list[dict]:
     alerts.sort(key=lambda a: a['sample_t']['trade_date'], reverse=True)
     return alerts
 
+# ── 實價提醒報表回溯比對（reconcile）───────────────────────────────────────
+
+def reconcile_realprice_alerts(dry_run: bool = False) -> dict:
+    """
+    對照現有 land_master.db，回溯比對實價提醒報表_最新完成版.xlsx。
+
+    邏輯：
+      對每一筆「建議動作」不含「已調閱」的提醒列，
+      以 (normalized_section, normalized_land_no, 實價日期) 查 DB 的買賣記錄，
+      若 is_reflected_in_master() 回傳 True（DB 已有 reg_date ≥ 實價日且差距 ≤ 90 天的買賣）
+      → 更新「建議動作」為「已調閱（自動比對）YYYY-MM-DD」
+
+    典型觸發場景：
+      import_land_master.py 批量匯入新地主後（未走 process_land_transcripts.py），
+      實價提醒報表未自動更新 → 手動或定期執行此函數修正。
+
+    回傳：
+      {
+        'checked': int,      # 掃描的未處理提醒筆數
+        'marked':  int,      # 本次標記為已調閱的筆數
+        'skipped': int,      # 仍無法確認（DB 無對應買賣記錄）
+        'dry_run': bool,
+      }
+    """
+    import openpyxl
+    import sqlite3
+
+    if not LATEST_REPORT.exists():
+        print(f'[reconcile] 找不到報表：{LATEST_REPORT}')
+        return {'checked': 0, 'marked': 0, 'skipped': 0, 'dry_run': dry_run}
+
+    today_str = date.today().strftime('%Y-%m-%d')
+
+    # ── 讀取報表，找欄位 index ──
+    wb = openpyxl.load_workbook(str(LATEST_REPORT))
+    ws = wb.active
+    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+
+    def col(name):
+        return headers.index(name) + 1 if name in headers else None
+
+    sec_col    = col('地段')
+    no_col     = col('地號')
+    date_col   = col('實價日期')
+    action_col = col('建議動作')
+    owner_col  = col('所有權人') or col('所有人')
+
+    if not (sec_col and no_col and date_col and action_col):
+        print(f'[reconcile] 報表欄位不完整，中止')
+        wb.close()
+        return {'checked': 0, 'marked': 0, 'skipped': 0, 'dry_run': dry_run}
+
+    # ── 載入 land_master DB（只需要買賣記錄）──
+    con = sqlite3.connect(str(LM_DB), timeout=10)
+    con.row_factory = sqlite3.Row
+    db_rows = [dict(r) for r in con.execute("""
+        SELECT normalized_section, normalized_land_no,
+               reg_date, reg_reason, owner_name
+        FROM land_master
+        WHERE reg_reason = '買賣'
+    """).fetchall()]
+    con.close()
+
+    # 建立 (normalized_section, normalized_land_no) → [master row, ...] 快速索引
+    from collections import defaultdict
+    db_idx: dict[tuple, list[dict]] = defaultdict(list)
+    for r in db_rows:
+        db_idx[(r['normalized_section'], r['normalized_land_no'])].append(r)
+
+    # ── 逐列比對 ──
+    checked = marked = skipped = 0
+
+    for row_num in range(2, ws.max_row + 1):
+        action = str(ws.cell(row_num, action_col).value or '')
+        if '已調閱' in action:
+            continue  # 已處理，跳過
+
+        raw_sec   = str(ws.cell(row_num, sec_col).value or '').strip()
+        raw_no    = str(ws.cell(row_num, no_col).value or '').strip()
+        trade_date = str(ws.cell(row_num, date_col).value or '').strip()
+
+        if not (raw_sec and raw_no and trade_date):
+            continue
+
+        n_sec = norm_land_no.__module__ and raw_sec  # placeholder; use real normalize below
+        n_sec = re.sub(r'\([^)]*\)', '', raw_sec).strip()   # 移除 (0015) 等括號部分
+        n_no  = norm_land_no(raw_no)
+
+        # 在 DB 索引裡找符合的 section：使用 substring match（與 build_alerts 一致）
+        hit_masters = []
+        for (db_sec, db_no), masters in db_idx.items():
+            if db_no != n_no:
+                continue
+            if n_sec in db_sec or db_sec in n_sec or n_sec == db_sec:
+                hit_masters.extend(masters)
+
+        checked += 1
+
+        if not hit_masters:
+            skipped += 1
+            continue
+
+        reflected, reason = is_reflected_in_master(hit_masters, trade_date)
+        if reflected:
+            owner = str(ws.cell(row_num, owner_col).value or '') if owner_col else ''
+            new_action = f'已調閱（自動比對）{today_str}'
+            if not dry_run:
+                ws.cell(row_num, action_col).value = new_action
+            marked += 1
+            print(f'  [{"DRY" if dry_run else "OK"}] row {row_num:4d}  {raw_sec} {raw_no}'
+                  f'  {owner}  實價={trade_date}  → {reason[:50]}')
+        else:
+            skipped += 1
+
+    if marked and not dry_run:
+        wb.save(str(LATEST_REPORT))
+        print(f'[reconcile] 已儲存：{LATEST_REPORT}')
+    wb.close()
+
+    return {'checked': checked, 'marked': marked, 'skipped': skipped, 'dry_run': dry_run}
+
+
 # ── Excel 更新 ────────────────────────────────────────────────────
 
 def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None]:
@@ -552,15 +674,37 @@ def send_all_alerts(alerts: list[dict], dry_run: bool) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description='實價登錄比對提醒')
-    parser.add_argument('--dry-run',  action='store_true', help='只報告，不寫入')
-    parser.add_argument('--send-all', action='store_true', help='逐筆推播（確認 Excel 後再用）')
+    parser.add_argument('--dry-run',   action='store_true', help='只報告，不寫入')
+    parser.add_argument('--send-all',  action='store_true', help='逐筆推播（確認 Excel 後再用）')
+    parser.add_argument('--reconcile', action='store_true',
+                        help='回溯比對：對照現有 DB 將實價提醒報表中已反映的地號標為已調閱')
     args = parser.parse_args()
-    dry_run  = args.dry_run
-    send_all = args.send_all
+    dry_run   = args.dry_run
+    send_all  = args.send_all
+    reconcile = args.reconcile
 
     if send_all and dry_run:
         print('--dry-run 與 --send-all 不可同時使用')
         sys.exit(1)
+
+    # ── reconcile 模式：獨立執行，不跑完整比對流程 ──
+    if reconcile:
+        mode = 'DRY-RUN' if dry_run else '正式執行'
+        print(f'[ {mode} ] realprice_alert.py --reconcile')
+        print(f'時間：{datetime.now().strftime("%Y-%m-%d %H:%M")}')
+        print(f'報表：{LATEST_REPORT}')
+        print(f'DB  ：{LM_DB}')
+        print()
+        result = reconcile_realprice_alerts(dry_run=dry_run)
+        print()
+        print(f'── 結果 ──')
+        print(f'  掃描未處理提醒  ：{result["checked"]}')
+        print(f'  標記已調閱      ：{result["marked"]}')
+        print(f'  仍待人工確認    ：{result["skipped"]}')
+        if dry_run:
+            print(f'\n確認後執行（正式寫入）：')
+            print(f'  python3 scripts/realprice_alert.py --reconcile')
+        return
 
     mode = 'DRY-RUN' if dry_run else ('逐筆推播' if send_all else '正式執行（摘要推播）')
     print(f'[ {mode} ] realprice_alert.py')
