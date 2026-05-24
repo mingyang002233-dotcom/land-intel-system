@@ -654,6 +654,55 @@ def build_tg_message(filename: str, records: list[dict],
     return '\n'.join(lines)
 
 
+# ── 實價提醒報表：標記已處理 ────────────────────────────────────────────────
+
+REALPRICE_REPORT = EXCEL_DIR / '最新完成版' / '實價提醒報表_最新完成版.xlsx'
+_RP_COL_SECTION  = '地段'
+_RP_COL_LAND_NO  = '地號'
+_RP_COL_ACTION   = '建議動作'
+
+
+def mark_realprice_processed(processed_land_keys: set[tuple], dry_run: bool = False) -> int:
+    """
+    電傳解析成功入庫後，將實價提醒報表中對應地號標記為「已調閱電傳」。
+    processed_land_keys: set of (normalized_section, normalized_land_no)
+    回傳標記筆數。
+    """
+    import openpyxl
+    if not REALPRICE_REPORT.exists() or not processed_land_keys:
+        return 0
+
+    wb = openpyxl.load_workbook(str(REALPRICE_REPORT))
+    ws = wb.active
+
+    # 取得欄位 index（1-based）
+    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+    def col(name):
+        return headers.index(name) + 1 if name in headers else None
+
+    sec_col    = col(_RP_COL_SECTION)
+    no_col     = col(_RP_COL_LAND_NO)
+    action_col = col(_RP_COL_ACTION)
+    if not (sec_col and no_col and action_col):
+        return 0
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    marked = 0
+    for r in range(2, ws.max_row + 1):
+        sec = normalize_section(str(ws.cell(r, sec_col).value or ''))
+        no  = normalize_land_no(str(ws.cell(r, no_col).value or ''))
+        if (sec, no) in processed_land_keys:
+            cur = str(ws.cell(r, action_col).value or '')
+            if '已調閱' not in cur:
+                ws.cell(r, action_col).value = f'已調閱電傳 {today}'
+                marked += 1
+
+    if marked and not dry_run:
+        wb.save(str(REALPRICE_REPORT))
+    wb.close()
+    return marked
+
+
 # ── Excel 主清冊同步 ─────────────────────────────────────────────────────────
 
 def sync_excel(all_inserted: list[dict], dry_run: bool) -> dict:
@@ -741,14 +790,26 @@ def sync_excel(all_inserted: list[dict], dry_run: bool) -> dict:
         land_label    = f'{new_recs[0]["section_raw"]} {new_recs[0]["land_no_raw"]}'
 
         # 同地號可能混有舊電傳(False)和新電傳(True)
-        # 只有 allow_sold_mark=True 的 recs 才代表「最新狀態」，做 diff
-        active_recs = [r for r in new_recs if r.get('allow_sold_mark') is True]
-        if not active_recs:
-            # 全部都是舊電傳 / 同日事件，不更新 Excel
-            reason = new_recs[0].get('allow_sold_mark_reason', '')
-            preview.append(f'  ⚠️  略過Excel更新  {land_label}  （全為補歷史/同日事件）')
+        # 策略：
+        #   舊電傳補歷史（sys_status='舊電傳補歷史'）→ 完全跳過 Excel（保護正式資料不被舊資料覆蓋）
+        #   同日事件（sys_status='待人工確認'）       → 做 diff、可插入新地主，但不標已售
+        #   新電傳（allow_sold_mark=True）            → 完整 diff + 標已售
+        all_stale = [r for r in new_recs if r.get('sys_status') == '舊電傳補歷史']
+        if all_stale and len(all_stale) == len(new_recs):
+            # 全部都是舊電傳，完全跳過 Excel
+            preview.append(f'  ⚠️  略過Excel更新  {land_label}  （全為舊電傳補歷史）')
             continue
-        new_recs = active_recs   # diff 只對新電傳做
+
+        active_recs = [r for r in new_recs if r.get('allow_sold_mark') is True]
+        # 同日事件：allow_sold_mark=False 但仍可插入 Excel（不標已售）
+        same_day_recs = [r for r in new_recs if r.get('sys_status') == '待人工確認']
+        # diff 優先用 active_recs（新電傳）；若只有同日事件，用 same_day_recs 做 diff（只插入不標售）
+        diff_recs = active_recs if active_recs else same_day_recs
+        mark_sold_allowed = bool(active_recs)   # 只有新電傳才允許標已售
+        if not diff_recs:
+            preview.append(f'  ⚠️  略過Excel更新  {land_label}  （無可用記錄）')
+            continue
+        new_recs = diff_recs
 
         # 把 Excel 舊地主整理成 dict 格式供 diff 使用
         old_recs_excel = []
@@ -767,13 +828,17 @@ def sync_excel(all_inserted: list[dict], dry_run: bool) -> dict:
         # 判定插入位置：同地號 Excel 列中最大 row
         insert_after = max(all_land_rows) if all_land_rows else None
 
-        # A. 消失的地主 → 標已售出
+        # A. 消失的地主 → 標已售出（只有 allow_sold_mark=True 的電傳才執行）
         for old_r in result['disappeared']:
             row = old_r['_row']
-            ops.append(('mark_sold', row, old_r, None))
-            sold_rows += 1
-            preview.append(f'  ❌ 標已售出  {land_label}  row={row}  {old_r["owner_name"]}'
-                           f'  （{_owner_id(old_r)}）')
+            if mark_sold_allowed:
+                ops.append(('mark_sold', row, old_r, None))
+                sold_rows += 1
+                preview.append(f'  ❌ 標已售出  {land_label}  row={row}  {old_r["owner_name"]}'
+                               f'  （{_owner_id(old_r)}）')
+            else:
+                preview.append(f'  ⚠️  待人工確認  {land_label}  row={row}  {old_r["owner_name"]}'
+                               f'  （同日事件，不標已售，待人工確認）')
 
         # B. 持分改變
         for old_r, new_r in result['share_changed']:
@@ -1140,6 +1205,17 @@ def main():
                 dry_run=dry_run
             )
 
+    # ── 實價提醒報表：標記已處理 ──
+    rp_marked = 0
+    if all_inserted_recs and not dry_run:
+        processed_keys = {
+            (r['normalized_section'], r['normalized_land_no'])
+            for r in all_inserted_recs
+        }
+        rp_marked = mark_realprice_processed(processed_keys, dry_run=False)
+        if rp_marked:
+            print(f'\n[實價報表] 已標記 {rp_marked} 筆為「已調閱電傳」：{REALPRICE_REPORT.name}')
+
     print(f'\n{"─"*50}')
     if dry_run:
         print(f'{mode_label} 摘要')
@@ -1181,6 +1257,8 @@ def main():
         print(f'  插入新地主列        ：{excel_result["inserted_rows"]}')
         print(f'  持分異動→備註       ：{excel_result.get("share_chg_rows",0)}')
         print(f'  主清冊路徑          ：{excel_result["excel_path"]}')
+        print(f'實價提醒報表：')
+        print(f'  標記已調閱電傳      ：{rp_marked}')
         print(f'系統：')
         print(f'  批次ID              ：{batch_id}')
 
