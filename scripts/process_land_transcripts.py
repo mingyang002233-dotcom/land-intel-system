@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-process_land_transcripts.py  v5.1
+process_land_transcripts.py  v5.2
 電傳 YAML → 解析 → 更新 SQLite land_master.db → 同步主清冊 Excel
 
 用法：
@@ -8,9 +8,10 @@ process_land_transcripts.py  v5.1
   python3 scripts/process_land_transcripts.py --dry-run   # 只解析，不寫入，不移動檔案
 
 資料夾：
-  電傳待解析/   ← 放入 .yaml / .yaml.txt
+  電傳解析/     ← download_watcher 自動搬入（inbox），也可手動放入 .yaml / .yaml.txt
   電傳已完成/   ← 成功後移入
   電傳錯誤/     ← 解析失敗移入
+  電傳待解析/   ← 已廢棄（deprecated），請改用電傳解析/
 
 YAML 格式（最小範例）：
   縣市: 新北市
@@ -47,7 +48,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH      = PROJECT_ROOT / 'data' / 'database' / 'land_master.db'
 
-INBOX_DIR    = Path('/Users/xiaomingyang/Desktop/excel土地資料維護/電傳待解析')
+INBOX_DIR    = PROJECT_ROOT / '電傳解析'
 DONE_DIR     = Path('/Users/xiaomingyang/Desktop/excel土地資料維護/電傳已完成')
 ERROR_DIR    = Path('/Users/xiaomingyang/Desktop/excel土地資料維護/電傳錯誤')
 EXCEL_DIR    = Path('/Users/xiaomingyang/Desktop/excel土地資料維護')

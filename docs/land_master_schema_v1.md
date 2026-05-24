@@ -224,6 +224,8 @@ CREATE INDEX idx_lm_location_tag ON land_master(location_tag);
 | v4.1 | 主清冊乾淨化（移除 externalLinks、欄位瘦身至 24 欄）| ✅ 完成 |
 | v4.2 | 資料品質檢查（`check_land_master_quality.py`）+ 郵遞區號自動補正（`apply_postal_fix.py`）| ✅ 完成 |
 | v5 | 電傳解析 → 自動更新謄本事件（`process_land_transcripts.py`）| ✅ 完成 |
+| v5.1 | 系統判定欄位（sys_status/sys_note/sys_source/sys_updated_at/sys_batch_id）| ✅ 完成 |
+| v5.2 | Downloads → watcher → 電傳解析/ → ingestion 全自動 pipeline（`download_watcher.py`）| ✅ 完成 |
 | v6 | 月排程：定期實價比對 + 推播 | 規劃中 |
 
 ---
