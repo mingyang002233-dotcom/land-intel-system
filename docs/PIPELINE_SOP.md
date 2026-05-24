@@ -1,6 +1,6 @@
 # Land Intel System — 正式 Pipeline SOP
 
-> 版本：v5.2（2026-05-24）  
+> 版本：v5.3（2026-05-24）  
 > 此文件為 auto-compact / 新對話重啟後的「制度化記憶」。  
 > 讀完此文件即可理解系統現況，無需翻歷史對話。
 
@@ -157,11 +157,12 @@ event_key = SHA256(
 
 ---
 
-## 九、實價提醒報表核心規則（正式鎖定）
+## 九、實價提醒報表核心規則（正式鎖定 v5.3）
 
 ### 定位
 
-**實價提醒報表 = 買賣異動待調閱清單**，來源是實價登錄比對結果。
+**實價提醒報表 = 尚未調閱的待辦清單**，只保留現在仍需調閱謄本的地號。  
+歷史資料（已調閱、已反映）保存於 SQLite + MASTER 清冊，**不留在報表中**。
 
 ### 觸發條件（會進入報表）
 
@@ -174,6 +175,14 @@ event_key = SHA256(
 - 繼承、贈與、地目調整、分割、合併
 - → 這些屬於未來「他項權利情報」或「地主金融壓力」模組
 
+### 移除條件（從報表刪除）
+
+以下情況直接 **刪除該列**，不留任何標記狀態：
+
+1. foundi 電傳成功解析（`reg_reason='買賣'`）→ `mark_realprice_processed()` 刪除
+2. `reconcile_realprice_alerts()` 判定「已反映」→ 直接刪除
+3. `reconcile_realprice_alerts()` 遇到舊有「已調閱」殘留列 → 一併清除
+
 ### is_reflected_in_master() 核心邏輯
 
 ```
@@ -181,7 +190,7 @@ event_key = SHA256(
   reg_reason = '買賣'
   reg_date   >= 實價成交日期（差距 ≤ 90 天）
 
-→ 代表新地主結構已存在，此提醒可標已調閱
+→ 代表新地主結構已存在，此地號直接從報表移除
 ```
 
 **明確不使用**：`is_sold` / 已售出欄位  
@@ -192,19 +201,33 @@ event_key = SHA256(
 
 1. `reg_reason = '買賣'`（電傳確認買賣事件）
 2. 成功寫入 SQLite
-3. 報表有該地號的未處理提醒
+3. 報表有該地號的列
 
+觸發後：直接 `delete_rows`，不寫「已調閱」欄位。  
 非買賣事件（抵押、地目等）**不**觸發，即使電傳解析成功。
 
 ### reconcile_realprice_alerts() 用途
 
 批量匯入（`import_land_master.py`）後，報表不會自動更新。  
-執行 `--reconcile` 回溯比對整張報表：
+執行 `--reconcile` 回溯比對整張報表，移除已反映地號：
 
 ```bash
-python3 scripts/realprice_alert.py --reconcile --dry-run  # 預覽
-python3 scripts/realprice_alert.py --reconcile            # 正式執行
+python3 scripts/realprice_alert.py --reconcile --dry-run  # 預覽（顯示將移除幾列）
+python3 scripts/realprice_alert.py --reconcile            # 正式執行（直接刪列）
 ```
+
+### reconcile_sold_status() 用途
+
+bulk import 歷史資料未跑 diff，導致舊地主 `is_sold=0`、Excel 未反灰。  
+執行 `--reconcile-sold` 補標已售並重新格式化：
+
+```bash
+python3 scripts/realprice_alert.py --reconcile-sold --dry-run  # 預覽
+python3 scripts/realprice_alert.py --reconcile-sold            # 正式執行 + reformat
+```
+
+**判定規則**：`reg_reason ≠ '買賣'`（前手）且 `reg_date < 同地號最早買賣日期` → 標 `is_sold=1`。  
+`reg_reason='買賣'` 的記錄**永不自動標售**（買賣本身即為現任或歷史購入方）。
 
 ---
 
@@ -266,7 +289,8 @@ launchctl unload ~/Library/LaunchAgents/com.landmaster.download-watcher.plist
 | `land_master_bot.py` | Telegram bot（常駐）| LaunchAgent 管理 |
 | `update_excel_realprice.py` | 主清冊加實價比對欄 | `--dry-run` |
 | `reformat_and_sort_master()` | 全表格式化 + 排序（函數）| 由 process 自動呼叫 |
-| `reconcile_realprice_alerts()` | 回溯更新已調閱（函數）| `--reconcile` CLI |
+| `reconcile_realprice_alerts()` | 回溯比對，移除已反映地號（函數）| `--reconcile` CLI |
+| `reconcile_sold_status()` | 補標 bulk import 舊地主 is_sold + reformat | `--reconcile-sold` CLI |
 
 ---
 
@@ -288,7 +312,7 @@ launchctl unload ~/Library/LaunchAgents/com.landmaster.download-watcher.plist
 | 地主金融壓力模型 | 融資比例、貸款銀行追蹤 | 未來 |
 | `--force-sold` 旗標 | 強制標已售（目前 `--force` 不允許標售）| 需要時再實作 |
 | `前次移轉現值` 寫入 DB | 目前解析但未落欄 | 低 |
-| reconcile 整合到 import_land_master.py | 批量匯入後自動 reconcile | 中 |
+| reconcile 整合到 import_land_master.py | 批量匯入後自動 reconcile + reconcile-sold | 中 |
 
 ---
 
@@ -310,4 +334,4 @@ launchctl unload ~/Library/LaunchAgents/com.landmaster.download-watcher.plist
 ---
 
 *本文件應在每次架構重大變更後更新。*  
-*上次更新：2026-05-24*
+*上次更新：2026-05-24（v5.3）*
