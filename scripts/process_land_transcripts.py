@@ -654,6 +654,177 @@ def build_tg_message(filename: str, records: list[dict],
     return '\n'.join(lines)
 
 
+# ── Excel 格式規則（顯示用，不改資料）────────────────────────────────────────
+#
+# 優先順序（高→低）：
+#   1. 已售出 → 整列灰字 + 淡灰底（最高優先）
+#   2. 近半年買賣 → 整列淡黃底
+#   3. 其他 → 無特殊格式
+#
+# 已售出判斷：'已售出' 欄值為 '已售'/'是'/'y'/'1'/1/True 之一
+# 近半年買賣：登記原因='買賣' AND 登記日期距今 ≤ 180 天 AND 未售出
+#
+
+_SOLD_VALS  = {'已售', '是', 'y', '1', '已售出'}   # lower-case 比對
+
+from openpyxl.styles import Font, PatternFill, Color
+
+MASTER_FONT      = Font(name='微軟正黑體', size=10)
+SOLD_FONT_STYLE  = Font(name='微軟正黑體', size=10, color='999999')
+SOLD_FILL_STYLE  = PatternFill('solid', fgColor='EBEBEB')   # 淡灰
+RECENT_FILL_STYLE= PatternFill('solid', fgColor='FFFACD')   # 淡黃（lemon chiffon）
+MARK_SOLD_FILL   = PatternFill('solid', fgColor='FFD7D7')   # 淡紅（標記已售瞬間保留，下次 reformat 轉灰）
+NO_FILL          = PatternFill(fill_type=None)
+
+
+def _sold_flag(v) -> bool:
+    if v is None:
+        return False
+    return str(v).strip().lower() in _SOLD_VALS or v is True or v == 1
+
+
+def _roc_date_to_ad(s) -> 'datetime.date | None':
+    """將民國日期字串轉為西元 date，供半年比對用。"""
+    from datetime import date
+    import re
+    if not s:
+        return None
+    s = str(s).strip()
+    try:
+        m = re.match(r'(\d+)年(\d+)月(\d+)日', s)
+        if m:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return date(y + 1911, mo, d)
+        m = re.match(r'(\d+)/(\d+)/(\d+)', s)
+        if m:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return date(y + 1911, mo, d)
+    except (ValueError, OverflowError):
+        pass
+    return None
+
+
+def _row_fill_and_font(sold_val, reg_reason, reg_date_str, cutoff):
+    """回傳 (fill, font) for a data row. cutoff = date 180 days ago."""
+    if _sold_flag(sold_val):
+        return SOLD_FILL_STYLE, SOLD_FONT_STYLE
+    if str(reg_reason or '').strip() == '買賣':
+        d = _roc_date_to_ad(reg_date_str)
+        if d and d >= cutoff:
+            return RECENT_FILL_STYLE, MASTER_FONT
+    return NO_FILL, MASTER_FONT
+
+
+def _apply_row_format(ws, row_num: int, fill, font, max_col: int):
+    """對單列套用格式（只改 fill + font color，不改 border/alignment）。"""
+    for c in range(1, max_col + 1):
+        cell = ws.cell(row_num, c)
+        cell.fill = fill
+        cell.font = font
+
+
+def reformat_and_sort_master(dry_run: bool = False) -> dict:
+    """
+    全表排序 + 重新套用格式。
+    排序規則：地段 → 地號 → 登記日期（民國升序）→ 登記次序
+    格式規則：已售出→灰；近半年買賣→淡黃；其他→正常
+    回傳 {'sorted': True, 'sold_grey': N, 'recent_yellow': N, 'elapsed': secs}
+    """
+    import time
+    from datetime import date, timedelta
+    import openpyxl
+
+    t0 = time.time()
+    cutoff = date.today() - timedelta(days=180)
+
+    EXCEL = str(EXCEL_MASTER)
+    SEC_COL    = _XC['地段']        # 0-based
+    NO_COL     = _XC['地號']
+    DATE_COL   = _XC['登記日期']
+    SEQ_COL    = _XC['次序']
+    SOLD_COL   = _XC['已售出']
+    REASON_COL = _XC['登記原因']
+
+    # ── Step 1: 讀取所有列值（read_only 快速）──
+    print('[reformat] Step 1/4: 讀取資料…')
+    wb_r = openpyxl.load_workbook(EXCEL, read_only=True, data_only=True)
+    ws_r = wb_r.active
+    header = [ws_r.cell(1, c+1).value for c in range(ws_r.max_column)]
+    all_rows = [list(row) for row in ws_r.iter_rows(min_row=2, values_only=True)]
+    max_col = ws_r.max_column
+    wb_r.close()
+    print(f'  {len(all_rows):,} 列，{max_col} 欄，耗時 {time.time()-t0:.1f}s')
+
+    # ── Step 2: 排序 ──
+    print('[reformat] Step 2/4: 排序…')
+
+    def sort_key(row):
+        sec  = normalize_section(str(row[SEC_COL] or ''))
+        no   = normalize_land_no(str(row[NO_COL] or ''))
+        dt   = _roc_date_to_ad(row[DATE_COL]) or date(1900, 1, 1)
+        try:
+            seq = int(str(row[SEQ_COL] or '0').strip().lstrip('0') or '0')
+        except ValueError:
+            seq = 0
+        return (sec, no, dt, seq)
+
+    all_rows.sort(key=sort_key)
+    print(f'  排序完成，耗時 {time.time()-t0:.1f}s')
+
+    if dry_run:
+        sold_c = sum(1 for r in all_rows if _sold_flag(r[SOLD_COL]))
+        recent_c = sum(1 for r in all_rows
+                       if not _sold_flag(r[SOLD_COL])
+                       and str(r[REASON_COL] or '') == '買賣'
+                       and _roc_date_to_ad(r[DATE_COL]) and _roc_date_to_ad(r[DATE_COL]) >= cutoff)
+        return {'sorted': True, 'sold_grey': sold_c, 'recent_yellow': recent_c,
+                'elapsed': time.time() - t0}
+
+    # ── Step 3: 寫回 + 套用格式 ──
+    print('[reformat] Step 3/4: 載入可寫 workbook…')
+    wb = openpyxl.load_workbook(EXCEL)
+    ws = wb.active
+    print(f'  載入完成，耗時 {time.time()-t0:.1f}s')
+
+    print('[reformat] Step 4/4: 寫入排序後資料 + 格式…')
+    sold_grey = 0
+    recent_yellow = 0
+
+    for i, row_data in enumerate(all_rows, start=2):
+        sold_val   = row_data[SOLD_COL]
+        reason_val = row_data[REASON_COL]
+        date_val   = row_data[DATE_COL]
+
+        fill, font = _row_fill_and_font(sold_val, reason_val, date_val, cutoff)
+        if fill is SOLD_FILL_STYLE:
+            sold_grey += 1
+        elif fill is RECENT_FILL_STYLE:
+            recent_yellow += 1
+
+        for c_idx, val in enumerate(row_data, start=1):
+            cell = ws.cell(i, c_idx)
+            cell.value = val
+            cell.fill  = fill
+            cell.font  = font
+
+        if i % 10000 == 0:
+            pct = (i - 1) / len(all_rows) * 100
+            print(f'  進度 {pct:.0f}%（{i-1:,}/{len(all_rows):,}）耗時 {time.time()-t0:.1f}s')
+
+    # 清除多餘列（排序後列數不變，但以防萬一）
+    if ws.max_row > len(all_rows) + 1:
+        ws.delete_rows(len(all_rows) + 2, ws.max_row - len(all_rows) - 1)
+
+    print(f'[reformat] 儲存中…')
+    wb.save(EXCEL)
+    wb.close()
+
+    elapsed = time.time() - t0
+    print(f'[reformat] 完成！已售灰={sold_grey} 近半年黃={recent_yellow} 耗時={elapsed:.1f}s')
+    return {'sorted': True, 'sold_grey': sold_grey,
+            'recent_yellow': recent_yellow, 'elapsed': elapsed}
+
+
 # ── 實價提醒報表：標記已處理 ────────────────────────────────────────────────
 #
 # 實價提醒報表的正確定位：
@@ -778,8 +949,7 @@ def sync_excel(all_inserted: list[dict], dry_run: bool) -> dict:
             owner_rows[(n_sec, n_no, name)] = r
 
     DATA_FONT = Font(name='微軟正黑體', size=10)
-    SOLD_FILL = PatternFill('solid', fgColor='FFD7D7')   # 淡紅：已售出
-    NEW_FILL  = PatternFill('solid', fgColor='E2EFDA')   # 淡綠：新增列
+    NEW_FILL  = PatternFill('solid', fgColor='E2EFDA')   # 淡綠：新增列（臨時，reformat 後依規則覆蓋）
 
     sold_rows     = 0
     inserted_rows = 0
@@ -952,7 +1122,7 @@ def sync_excel(all_inserted: list[dict], dry_run: bool) -> dict:
         for col_name in ('地號', '統一編號（遮罩）', '統一編號（完整）', '郵遞區號', '電話'):
             ws.cell(nr, _XC[col_name] + 1).number_format = '@'
 
-    # mark_sold
+    # mark_sold → 整列反灰
     for op, tgt, old_r, _ in ops:
         if op == 'mark_sold':
             old_note = str(ws.cell(tgt, _XC['備註'] + 1).value or '').strip()
@@ -960,7 +1130,7 @@ def sync_excel(all_inserted: list[dict], dry_run: bool) -> dict:
             ws.cell(tgt, _XC['已售出']   + 1).value = 1
             ws.cell(tgt, _XC['備註']     + 1).value = new_note
             ws.cell(tgt, _XC['更新日期'] + 1).value = today
-            ws.cell(tgt, _XC['已售出']   + 1).fill  = SOLD_FILL
+            _apply_row_format(ws, tgt, SOLD_FILL_STYLE, SOLD_FONT_STYLE, ws.max_column)
 
     # mark_share_changed
     SHARE_CHG_FILL = PatternFill('solid', fgColor='FFF2CC')
@@ -1229,6 +1399,12 @@ def main():
                 dry_run=dry_run
             )
 
+    # ── 全表排序 + 格式化 ──
+    fmt_result = {'sorted': False, 'sold_grey': 0, 'recent_yellow': 0}
+    if all_inserted_recs and not dry_run:
+        print('\n[reformat] 重新套用格式與排序…')
+        fmt_result = reformat_and_sort_master(dry_run=False)
+
     # ── 實價提醒報表：標記已處理（只處理買賣事件）──
     rp_marked = 0
     if all_inserted_recs and not dry_run:
@@ -1277,6 +1453,10 @@ def main():
         print(f'  插入新地主列        ：{excel_result["inserted_rows"]}')
         print(f'  持分異動→備註       ：{excel_result.get("share_chg_rows",0)}')
         print(f'  主清冊路徑          ：{excel_result["excel_path"]}')
+        print(f'格式化：')
+        print(f'  已售出反灰列數      ：{fmt_result["sold_grey"]}')
+        print(f'  近半年買賣反黃列數  ：{fmt_result["recent_yellow"]}')
+        print(f'  全表排序            ：{"✅" if fmt_result["sorted"] else "跳過"}')
         print(f'實價提醒報表：')
         print(f'  標記已調閱電傳      ：{rp_marked}')
         print(f'系統：')
