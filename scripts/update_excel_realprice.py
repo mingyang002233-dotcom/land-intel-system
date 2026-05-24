@@ -33,7 +33,7 @@ BACKUP_DIR  = BASE_DIR / 'backup'
 LOGS_DIR    = BASE_DIR / 'logs'
 ARCHIVE_DIR = BASE_DIR / 'archive'
 LATEST_DIR  = BASE_DIR / '最新完成版'
-LATEST_FILE = LATEST_DIR / '土地主清冊_最新完成版.xlsx'
+LATEST_FILE = LATEST_DIR / '老蕭LAND_MASTER.xlsx'
 
 # 優先使用最新完成版（已含小段＋正規化地號），否則 fallback 到 input
 DEFAULT_XLSX = LATEST_FILE if LATEST_FILE.exists() else INPUT_DIR / '土地主清冊_正式版_最新.xlsx'

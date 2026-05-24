@@ -26,10 +26,11 @@ from pathlib import Path
 import openpyxl
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_XLSX  = Path('/Users/xiaomingyang/Desktop/excel土地資料維護/土地主清冊_正式版_20260522_郵遞區號補正版.xlsx')
+DEFAULT_XLSX  = Path('/Users/xiaomingyang/Desktop/excel土地資料維護/最新完成版/老蕭LAND_MASTER.xlsx')
 DEFAULT_DB    = PROJECT_ROOT / 'data' / 'database' / 'land_master.db'
 
 ALLOWED_SHEET   = '總表'
+ALLOWED_SHEET_ALT = '土地主清冊'  # 老蕭LAND_MASTER.xlsx 使用此工作表名稱
 FORBIDDEN_SHEETS = {
     '隱匿地址', '退件區', '工作表5',
     '縣市選單', '地段小段選單', '分區原因選單',
@@ -37,50 +38,77 @@ FORBIDDEN_SHEETS = {
 }
 
 
-# ── 欄位對應 ─────────────────────────────────────────────────────
-# 依總表實際欄序（index）直接對應，避免重複欄名歧義
-#   index → (db_col, action)
-#   action: keep / skip / masked_id / full_id / phone / extra
-COL_SPEC = {
-    0:  ('updated_at',       'keep'),
-    1:  ('zone_type',        'keep'),
-    2:  ('location_tag',     'keep'),
-    3:  ('city',             'keep'),
-    4:  ('district',         'keep'),     # 地區 → district
-    5:  ('section_raw',      'keep'),     # 地段原始值
-    6:  (None,               'skip'),     # 資料清理後的地段 → 淘汰
-    7:  ('sub_section',      'keep'),     # 小段
-    8:  ('land_no_raw',      'keep'),     # 地號原始值
-    9:  (None,               'skip'),     # 統一格式的地號 → 淘汰
-    10: ('announced_value',  'keep'),
-    11: (None,               'skip'),     # 地目 → 淘汰
-    12: ('reg_seq',          'keep'),
-    13: ('reg_date',         'keep'),
-    14: ('reg_reason',       'keep'),
-    15: ('cause_date',       'keep'),     # 發生日期
-    16: ('owner_name',       'keep'),
-    17: ('owner_id_masked',  'masked_id'), # 第一個統一編號 = 遮罩
-    18: ('owner_id_full',    'full_id'),   # 第二個統一編號 = 完整
-    19: ('postal_code',      'keep'),
-    20: (None,               'skip'),     # 公式代入郵遞區號 → 淘汰
-    21: ('address',          'keep'),     # 住址
-    22: ('is_sold',          'keep'),
-    23: (None,               'skip'),     # 地址錯誤提醒 → 淘汰
-    24: ('share_denom',      'keep'),
-    25: ('share_numer',      'keep'),
-    26: ('total_area_ping',  'keep'),     # 土地總坪數
-    27: ('ownership_range',  'keep'),     # 權力範圍
-    28: ('note',             'keep'),
-    29: ('purchase_price',   'keep'),     # 進價（額外欄）
-    30: (None,               'phone'),    # 電話 1
-    31: (None,               'phone'),    # 電話 2
-    32: (None,               'phone'),    # 電話 3
-    33: (None,               'phone'),    # 電話 4
-    34: (None,               'phone'),    # 電話 5
-    35: (None,               'phone'),    # 電話 6
+# ── 欄位對應（header-name based，不依賴欄位順序）──────────────────
+# 欄名 → (db_col, action)
+# action: keep / skip / masked_id / full_id / phone
+# aliases: 新舊 Excel 欄名不同但語意相同的，統一對應到同一 db_col
+HEADER_MAP: dict[str, tuple[str | None, str]] = {
+    '更新日期':        ('updated_at',      'keep'),
+    '分區':           ('zone_type',       'keep'),
+    '位置':           ('location_tag',    'keep'),
+    '縣市':           ('city',            'keep'),
+    '地區':           ('district',        'keep'),
+    '地段':           ('section_raw',     'keep'),
+    '小段':           ('sub_section',     'keep'),
+    '地號':           ('land_no_raw',     'keep'),
+    '公告現值':        ('announced_value', 'keep'),
+    '次序':           ('reg_seq',         'keep'),
+    '登記次序':        ('reg_seq',         'keep'),   # alias
+    '登記日期':        ('reg_date',        'keep'),
+    '登記原因':        ('reg_reason',      'keep'),
+    '發生日期':        ('cause_date',      'keep'),
+    '所有權人':        ('owner_name',      'keep'),
+    '統一編號（遮罩）':  ('owner_id_masked', 'masked_id'),
+    '統一編號遮罩':     ('owner_id_masked', 'masked_id'),  # alias
+    '統一編號（完整）':  ('owner_id_full',   'full_id'),
+    '統一編號完整':     ('owner_id_full',   'full_id'),    # alias
+    '郵遞區號':        ('postal_code',     'keep'),
+    '住址':           ('address',         'keep'),
+    '已售出':         ('is_sold',         'keep'),
+    '分母':           ('share_denom',     'keep'),
+    '分子':           ('share_numer',     'keep'),
+    '持分':           (None,              'skip'),   # 計算欄，不匯入
+    '持分坪數':        (None,              'skip'),   # 計算欄，不匯入
+    '土地總坪數':       ('total_area_ping', 'keep'),
+    '權利範圍':        ('ownership_range', 'keep'),
+    '備註':           ('note',            'keep'),
+    '進價':           ('purchase_price',  'keep'),
+    '電話':           (None,              'phone'),
+    # 舊 Excel 特有欄（忽略）
+    '實價命中':        (None,              'skip'),
+    '實價日期':        (None,              'skip'),
+    '實價總價(萬)':     (None,              'skip'),
+    '同批命中地號':      (None,              'skip'),
+    '建議動作':        (None,              'skip'),
+    # 系統判定欄位（AB–AF），由程式自動寫入，import 時略過
+    '系統處理狀態':     (None,              'skip'),
+    '系統處理備註':     (None,              'skip'),
+    '系統來源':        (None,              'skip'),
+    '系統更新時間':     (None,              'skip'),
+    '系統批次ID':      (None,              'skip'),
 }
 
-REQUIRED_DB_COLS = ['city', 'district', 'section_raw', 'land_no_raw']
+# 必要欄位（欄名），缺任何一個就停止
+REQUIRED_HEADERS = ['縣市', '地區', '地段', '地號', '所有權人']
+
+REQUIRED_DB_COLS = ['city', 'district', 'section_raw']
+
+
+def build_col_index_map(header_row: list) -> dict[str, int]:
+    """
+    從標題列建立「欄名 → 欄索引」對應。
+    回傳 {col_name: index}，並驗證必要欄位是否存在。
+    """
+    col_map = {}
+    for i, h in enumerate(header_row):
+        name = str(h).strip() if h is not None else ''
+        if name:
+            col_map[name] = i
+
+    missing = [h for h in REQUIRED_HEADERS if h not in col_map]
+    if missing:
+        raise ValueError(f'Excel 缺少必要欄位：{missing}，停止匯入。')
+    return col_map
 
 
 # ── Normalize ────────────────────────────────────────────────────
@@ -190,7 +218,12 @@ CREATE TABLE IF NOT EXISTS land_master (
     -- 系統欄位
     source_row              INTEGER,
     created_at              TEXT DEFAULT (datetime('now')),
-    imported_at             TEXT DEFAULT (datetime('now'))
+    imported_at             TEXT DEFAULT (datetime('now')),
+    sys_status              TEXT,
+    sys_note                TEXT,
+    sys_source              TEXT,
+    sys_updated_at          TEXT,
+    sys_batch_id            TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lm_event_key
     ON land_master(event_key) WHERE event_key != '';
@@ -290,12 +323,26 @@ def _to_real(v) -> float | None:
         return None
 
 
-def parse_row(cells: list, row_idx: int) -> dict:
-    """將一列 cell 值轉成 DB record dict。"""
+def parse_row(cells: list, row_idx: int,
+              col_map: dict[str, int] | None = None) -> dict:
+    """
+    將一列 cell 值轉成 DB record dict。
+    col_map: build_col_index_map() 的結果，{欄名: 欄索引}。
+    若為 None 則退回舊 index 模式（僅供向下相容，不建議使用）。
+    """
     rec: dict = {}
     phones: list[str] = []
 
-    for col_idx, (db_col, action) in COL_SPEC.items():
+    if col_map is None:
+        raise ValueError('parse_row 需要 col_map，請用 build_col_index_map() 建立。')
+
+    # 已對應到同一 db_col 的欄名只取第一個出現的（alias 去重）
+    seen_db_col: set[str] = set()
+    for col_name, (db_col, action) in HEADER_MAP.items():
+        col_idx = col_map.get(col_name)
+        if col_idx is None:
+            continue   # 此 Excel 無此欄，略過
+
         raw = cells[col_idx] if col_idx < len(cells) else None
         val = _clean(raw)
 
@@ -305,8 +352,9 @@ def parse_row(cells: list, row_idx: int) -> dict:
             if val:
                 phones.append(val)
         elif action in ('masked_id', 'full_id', 'keep'):
-            rec[db_col] = val
-        # extra 同 keep，已在 keep 處理
+            if db_col not in seen_db_col:
+                rec[db_col] = val
+                seen_db_col.add(db_col)
 
     rec['phone'] = '、'.join(phones) if phones else None
 
@@ -366,20 +414,28 @@ def make_row_hash(rec: dict) -> str:
 def make_event_key(rec: dict) -> str:
     """
     事件級唯一鍵：同地主同地號的不同登記事件各有唯一 key。
-    key 組成：land_match_key | owner_key | reg_seq | reg_date | reg_reason | share_numer | share_denom
-    空值統一用空字串，避免 None 造成假差異。
+    key 組成：land_match_key | owner_key | owner_name | reg_seq | reg_date | reg_reason | share_numer | share_denom | source_row
+    - land_no_raw 為 NULL 時，land_match_key 缺地號，加入 source_row 確保每列唯一，避免 SQLite NULL UNIQUE 失效。
+    - 空值統一用空字串。
     """
+    lmk = rec.get('land_match_key') or ''
+    okey = rec.get('owner_key') or ''
+    has_land_no = bool((rec.get('land_no_raw') or '').strip())
     parts = [
-        rec.get('land_match_key') or '',
-        rec.get('owner_key')      or '',
-        rec.get('reg_seq')        or '',
-        rec.get('reg_date')       or '',
-        rec.get('reg_reason')     or '',
+        lmk,
+        okey,
+        rec.get('owner_name') or '',
+        rec.get('reg_seq')    or '',
+        rec.get('reg_date')   or '',
+        rec.get('reg_reason') or '',
         str(rec.get('share_numer')  or ''),
         str(rec.get('share_denom') or ''),
     ]
+    if not has_land_no:
+        # 無地號：加入 source_row 使每列有唯一 key，防止重複插入
+        parts.append(str(rec.get('source_row') or ''))
     src = '|'.join(parts)
-    if not any(parts[:2]):   # land_match_key 和 owner_key 都空 → 無意義
+    if not lmk and not okey:   # 連縣市地段人名都空 → 整列無意義
         return ''
     return hashlib.sha256(src.encode()).hexdigest()[:20]
 
@@ -475,25 +531,35 @@ def analyze_event_key(records: list[dict]):
 
 # ── 主流程 ───────────────────────────────────────────────────────
 
-def run_import(xlsx_path: Path, db_path: Path, dry_run: bool = False) -> dict:
+def run_import(xlsx_path: Path, db_path: Path, dry_run: bool = False,
+               rebuild: bool = False) -> dict:
     print(f"讀取 Excel：{xlsx_path}")
 
     wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
 
-    # 安全檢查：只允許 總表
-    if ALLOWED_SHEET not in wb.sheetnames:
-        print(f'❌ 找不到「{ALLOWED_SHEET}」sheet，停止。')
+    # 安全檢查：允許 總表 或 土地主清冊
+    _sheet = ALLOWED_SHEET if ALLOWED_SHEET in wb.sheetnames else (
+             ALLOWED_SHEET_ALT if ALLOWED_SHEET_ALT in wb.sheetnames else None)
+    if _sheet is None:
+        print(f'❌ 找不到「{ALLOWED_SHEET}」或「{ALLOWED_SHEET_ALT}」sheet，停止。')
         print(f'   現有 sheets：{wb.sheetnames}')
         wb.close()
         sys.exit(1)
 
-    ws = wb[ALLOWED_SHEET]
+    ws = wb[_sheet]
     rows = ws.iter_rows(values_only=True)
-    header_row = next(rows)   # 第 1 列 = 欄位名稱（略過，依 index 對應）
+    header_row = list(next(rows))   # 第 1 列 = 欄位名稱
 
-    # 驗證欄數
-    if len(header_row) < max(COL_SPEC.keys()) + 1:
-        print(f'⚠️  欄數不足：預期 ≥ {max(COL_SPEC.keys())+1}，實際 {len(header_row)}')
+    # 建立欄名對應（必要欄位缺失則停止）
+    try:
+        col_map = build_col_index_map(header_row)
+    except ValueError as e:
+        print(f'❌ {e}')
+        wb.close()
+        sys.exit(1)
+
+    mapped = {h: col_map[h] for h in col_map if h in HEADER_MAP}
+    print(f'  欄名對應：共 {len(header_row)} 欄，成功對應 {len(mapped)} 欄')
 
     records      = []
     errors       = []
@@ -503,7 +569,7 @@ def run_import(xlsx_path: Path, db_path: Path, dry_run: bool = False) -> dict:
         if all(v is None for v in row):
             continue   # 跳過全空列
         try:
-            rec = parse_row(list(row), row_idx)
+            rec = parse_row(list(row), row_idx, col_map=col_map)
             records.append(rec)
             # lookup 資料
             lk = (rec.get('city') or '', rec.get('district') or '',
@@ -519,13 +585,13 @@ def run_import(xlsx_path: Path, db_path: Path, dry_run: bool = False) -> dict:
         for ri, msg in errors[:10]:
             print(f'    Row {ri}: {msg}')
 
-    # 缺必要欄位檢查（以第一筆有效資料為準）
+    # 缺必要 DB 欄位值檢查（以第一筆有效資料為準）
     if records:
         sample = records[0]
         missing = [c for c in REQUIRED_DB_COLS if not sample.get(c)]
         if missing:
-            print(f'⚠️  必要欄位值缺失（第 2 列）：{missing}')
-            print('   請確認 Excel 欄序與 schema v1 一致。')
+            print(f'⚠️  必要 DB 欄位值缺失（第 2 列）：{missing}')
+            print('   請確認 Excel 包含對應欄位。')
 
     if dry_run:
         print('\n[dry-run] 未寫入資料庫，前 3 筆預覽：')
@@ -544,6 +610,12 @@ def run_import(xlsx_path: Path, db_path: Path, dry_run: bool = False) -> dict:
     ddl_con = sqlite3.connect(db_path)
     ddl_con.execute('PRAGMA journal_mode=WAL')
     ddl_con.execute('PRAGMA synchronous=NORMAL')
+    if rebuild:
+        ddl_con.execute('BEGIN')
+        ddl_con.execute('DELETE FROM land_master')
+        ddl_con.execute('DELETE FROM land_section_lookup')
+        ddl_con.execute('COMMIT')
+        print('  ♻️  rebuild 模式：已清空 land_master + land_section_lookup')
     ddl_con.executescript(DDL_MAIN)
     ddl_con.executescript(DDL_LOOKUP)
     # 既有 DB 若缺 row_hash 欄位，自動補上（向下相容）
@@ -718,6 +790,7 @@ def main():
     ap.add_argument('--file',    default=str(DEFAULT_XLSX))
     ap.add_argument('--db',      default=str(DEFAULT_DB))
     ap.add_argument('--dry-run', action='store_true', help='只解析，不寫入')
+    ap.add_argument('--rebuild', action='store_true', help='清空後全量重建（非增量）')
     ap.add_argument('--analyze', action='store_true', help='輸出 event_key 差異分析報告（不寫入）')
     ap.add_argument('--schema',  action='store_true', help='顯示 table schema')
     ap.add_argument('--sample',  action='store_true', help='顯示 sample query')
@@ -743,21 +816,23 @@ def main():
         # 直接重跑解析（analyze 模式下不在意時間）
         import openpyxl as _ox
         wb = _ox.load_workbook(xlsx, read_only=True, data_only=True)
-        ws = wb[ALLOWED_SHEET]
+        _s = ALLOWED_SHEET if ALLOWED_SHEET in wb.sheetnames else ALLOWED_SHEET_ALT
+        ws = wb[_s]
         it = ws.iter_rows(values_only=True)
-        next(it)
+        hdr = list(next(it))
+        _cm = build_col_index_map(hdr)
         recs = []
         for row_idx, row in enumerate(it, start=2):
             if all(v is None for v in row): continue
             try:
-                recs.append(parse_row(list(row), row_idx))
+                recs.append(parse_row(list(row), row_idx, col_map=_cm))
             except Exception:
                 pass
         wb.close()
         analyze_event_key(recs)
         return
 
-    res = run_import(xlsx, db, dry_run=args.dry_run)
+    res = run_import(xlsx, db, dry_run=args.dry_run, rebuild=args.rebuild)
     print_summary(res, db)
 
     if not args.dry_run:
