@@ -57,8 +57,12 @@ LATEST_REPORT = LATEST_DIR / '實價提醒報表_最新完成版.xlsx'
 REPORT_COLS = [
     '縣市', '地區', '地段', '地號', '所有人',
     '次序', '登記日期', '登記原因', '權利範圍', '已售出', '備註',
-    '實價日期', '實價總價(萬)', '同批命中地號', '建議動作',
+    '實價日期', '實價總價(萬)', '同批命中地號', '建議動作', '處理狀態',
 ]
+
+# 同事可填入的處理狀態值
+HUMAN_CONFIRMED_VALUE = '人工已確認'
+PENDING_VALUE         = '待調閱'
 
 # ── .env 載入 ─────────────────────────────────────────────────────
 
@@ -122,15 +126,35 @@ def fmt_unit(per_sqm):
 def init_alert_log(con: sqlite3.Connection):
     con.execute("""
         CREATE TABLE IF NOT EXISTS realprice_alert_log (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            dedup_key    TEXT UNIQUE,          -- city|district|section|land_no|trade_date|total_price
-            alert_type   TEXT,
-            hit_count    INTEGER,
-            notified_at  TEXT DEFAULT (datetime('now')),
-            telegram_ok  INTEGER DEFAULT 0
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            dedup_key            TEXT UNIQUE,
+            alert_type           TEXT,
+            hit_count            INTEGER,
+            notified_at          TEXT DEFAULT (datetime('now')),
+            telegram_ok          INTEGER DEFAULT 0,
+            manual_confirmed     INTEGER DEFAULT 0,
+            manual_confirmed_at  TEXT,
+            manual_reason        TEXT
         )
     """)
+    # 舊版 DB 補欄（ALTER TABLE IF NOT EXISTS 不支援，用 try/except）
+    for col_def in [
+        "ALTER TABLE realprice_alert_log ADD COLUMN manual_confirmed    INTEGER DEFAULT 0",
+        "ALTER TABLE realprice_alert_log ADD COLUMN manual_confirmed_at TEXT",
+        "ALTER TABLE realprice_alert_log ADD COLUMN manual_reason       TEXT",
+    ]:
+        try:
+            con.execute(col_def)
+        except Exception:
+            pass
     con.commit()
+
+
+def load_confirmed_keys(con: sqlite3.Connection) -> set:
+    """回傳所有已人工確認的 dedup_key，供 build_alerts() 排除。"""
+    return {r[0] for r in con.execute(
+        'SELECT dedup_key FROM realprice_alert_log WHERE manual_confirmed = 1'
+    ).fetchall()}
 
 # ── 資料載入 ─────────────────────────────────────────────────────
 
@@ -256,10 +280,17 @@ def build_alerts(lm_idx: dict, lt_rows: list[dict]) -> list[dict]:
     回傳 alert 列表，每個 alert = 一筆實價交易 × 命中的 land_master 列。
     同交易組（city+district+section+trade_date+total_price）保留分筆（不合並總價）。
     同一組內命中的所有 land_master 列合併顯示。
+    已人工確認的案件（realprice_alert_log.manual_confirmed=1）直接跳過，不重複提醒。
     """
     def tx_key(t):
         return (t['city'], t['district'], t['section_name'] or '',
                 t['trade_date'], str(t['total_price_wan']))
+
+    # 載入已人工確認的 key，避免重複提醒
+    _con = sqlite3.connect(LM_DB, timeout=10)
+    init_alert_log(_con)
+    confirmed_keys = load_confirmed_keys(_con)
+    _con.close()
 
     # 按交易 key 聚合實價地號
     tx_groups: dict[tuple, list] = defaultdict(list)
@@ -301,6 +332,10 @@ def build_alerts(lm_idx: dict, lt_rows: list[dict]) -> list[dict]:
         if dedup_key in seen_dedup:
             continue
         seen_dedup.add(dedup_key)
+
+        # ── 排除規則：已人工確認（同事在 Excel 選「人工已確認」並執行過 reconcile）──
+        if dedup_key in confirmed_keys:
+            continue
 
         # ── 排除規則：主清冊已反映此次買賣 ──
         reflected, reflect_reason = is_reflected_in_master(hit_masters, trade_date)
@@ -397,6 +432,7 @@ def reconcile_realprice_alerts(dry_run: bool = False) -> dict:
     no_col     = col('地號')
     date_col   = col('實價日期')
     action_col = col('建議動作')
+    status_col = col('處理狀態')   # 同事人工確認欄（新）
     owner_col  = col('所有權人') or col('所有人')
 
     if not (sec_col and no_col and date_col and action_col):
@@ -404,9 +440,10 @@ def reconcile_realprice_alerts(dry_run: bool = False) -> dict:
         wb.close()
         return {'checked': 0, 'removed': 0, 'remaining': 0, 'dry_run': dry_run}
 
-    # ── 載入 land_master DB（只需要買賣記錄）──
+    # ── 載入 land_master DB（買賣記錄 + alert_log）──
     con = sqlite3.connect(str(LM_DB), timeout=10)
     con.row_factory = sqlite3.Row
+    init_alert_log(con)
     db_rows = [dict(r) for r in con.execute("""
         SELECT normalized_section, normalized_land_no,
                reg_date, reg_reason, owner_name
@@ -423,14 +460,16 @@ def reconcile_realprice_alerts(dry_run: bool = False) -> dict:
 
     # ── 逐列比對，收集待刪列號（由大到小刪，避免位移）──
     rows_to_delete: list[int] = []
+    human_confirmed_rows: list[tuple] = []   # (row_num, section, land_no, trade_date, owner)
     checked = 0
     skipped = 0
     total_data_rows = ws.max_row - 1  # 不含 header
 
     for row_num in range(2, ws.max_row + 1):
         action = str(ws.cell(row_num, action_col).value or '')
+        status = str(ws.cell(row_num, status_col).value or '') if status_col else ''
 
-        # 已標「已調閱」的舊有列也一併清除
+        # 舊有「已調閱」標記一併清除
         if '已調閱' in action:
             rows_to_delete.append(row_num)
             continue
@@ -438,8 +477,16 @@ def reconcile_realprice_alerts(dry_run: bool = False) -> dict:
         raw_sec    = str(ws.cell(row_num, sec_col).value or '').strip()
         raw_no     = str(ws.cell(row_num, no_col).value or '').strip()
         trade_date = str(ws.cell(row_num, date_col).value or '').strip()
+        owner      = str(ws.cell(row_num, owner_col).value or '') if owner_col else ''
 
         if not (raw_sec and raw_no and trade_date):
+            continue
+
+        # ── 同事人工確認：直接結案 ──
+        if HUMAN_CONFIRMED_VALUE in status:
+            rows_to_delete.append(row_num)
+            human_confirmed_rows.append((row_num, raw_sec, raw_no, trade_date, owner))
+            print(f'  [{"DRY" if dry_run else "人工確認-結案"}] row {row_num:4d}  {raw_sec} {raw_no}  {owner}')
             continue
 
         n_sec = re.sub(r'\([^)]*\)', '', raw_sec).strip()
@@ -460,7 +507,6 @@ def reconcile_realprice_alerts(dry_run: bool = False) -> dict:
 
         reflected, reason = is_reflected_in_master(hit_masters, trade_date)
         if reflected:
-            owner = str(ws.cell(row_num, owner_col).value or '') if owner_col else ''
             rows_to_delete.append(row_num)
             print(f'  [{"DRY" if dry_run else "DEL"}] row {row_num:4d}  {raw_sec} {raw_no}'
                   f'  {owner}  實價={trade_date}  → {reason[:50]}')
@@ -470,14 +516,63 @@ def reconcile_realprice_alerts(dry_run: bool = False) -> dict:
     removed = len(rows_to_delete)
     remaining = total_data_rows - removed
 
-    if removed and not dry_run:
-        for row_num in sorted(rows_to_delete, reverse=True):
-            ws.delete_rows(row_num)
-        wb.save(str(LATEST_REPORT))
-        print(f'[reconcile] 已移除 {removed} 列，剩餘 {remaining} 筆待調閱')
-        print(f'[reconcile] 已儲存：{LATEST_REPORT}')
+    if not dry_run:
+        # ── 人工確認：寫入 realprice_alert_log + 回寫 MASTER sys_note ──
+        if human_confirmed_rows:
+            import openpyxl as _opx
+            today_str = date.today().strftime('%Y-%m-%d')
+            note_text = f'人工已確認（免調閱）{today_str}'
+
+            # 寫 SQLite
+            lm_con = sqlite3.connect(str(LM_DB), timeout=10)
+            init_alert_log(lm_con)
+            for _, raw_sec, raw_no, trade_date, owner in human_confirmed_rows:
+                dedup_key = f'human|{raw_sec}|{raw_no}|{trade_date}'
+                lm_con.execute("""
+                    INSERT OR REPLACE INTO realprice_alert_log
+                        (dedup_key, alert_type, hit_count,
+                         manual_confirmed, manual_confirmed_at, manual_reason)
+                    VALUES (?, '人工已確認', 1, 1, datetime('now'), '同事 Excel 標記')
+                """, (dedup_key,))
+            lm_con.commit()
+            lm_con.close()
+
+            # 回寫 MASTER sys_note
+            MASTER_XLSX = LATEST_DIR / '老蕭LAND_MASTER.xlsx'
+            if MASTER_XLSX.exists():
+                wb_m = _opx.load_workbook(str(MASTER_XLSX), data_only=True)
+                ws_m = wb_m.active
+                hdrs_m = [ws_m.cell(1, c).value for c in range(1, ws_m.max_column + 1)]
+                def _mc(name): return hdrs_m.index(name) + 1 if name in hdrs_m else None
+                msec_c  = _mc('地段')
+                mno_c   = _mc('地號')
+                mnote_c = _mc('系統處理備註')
+                noted = 0
+                if msec_c and mno_c and mnote_c:
+                    for _, raw_sec, raw_no, _, _ in human_confirmed_rows:
+                        n_sec = re.sub(r'\([^)]*\)', '', raw_sec).strip()
+                        n_no  = norm_land_no(raw_no)
+                        for r in range(2, ws_m.max_row + 1):
+                            rs = re.sub(r'\([^)]*\)', '', str(ws_m.cell(r, msec_c).value or '')).strip()
+                            rn = norm_land_no(str(ws_m.cell(r, mno_c).value or ''))
+                            if (rs == n_sec or n_sec in rs or rs in n_sec) and rn == n_no:
+                                cur = str(ws_m.cell(r, mnote_c).value or '').strip()
+                                ws_m.cell(r, mnote_c).value = (cur + ' | ' + note_text) if cur else note_text
+                                noted += 1
+                if noted:
+                    wb_m.save(str(MASTER_XLSX))
+                    print(f'[reconcile] MASTER sys_note 已更新 {noted} 列')
+                wb_m.close()
+
+        # 刪除報表列
+        if removed:
+            for row_num in sorted(rows_to_delete, reverse=True):
+                ws.delete_rows(row_num)
+            wb.save(str(LATEST_REPORT))
+            print(f'[reconcile] 已移除 {removed} 列（含 {len(human_confirmed_rows)} 筆人工確認），剩餘 {remaining} 筆待調閱')
+            print(f'[reconcile] 已儲存：{LATEST_REPORT}')
     elif dry_run:
-        print(f'[reconcile] DRY-RUN：將移除 {removed} 列，剩餘 {remaining} 筆待調閱')
+        print(f'[reconcile] DRY-RUN：將移除 {removed} 列（含 {len(human_confirmed_rows)} 筆人工確認），剩餘 {remaining} 筆待調閱')
     wb.close()
 
     return {'checked': checked, 'removed': removed, 'remaining': remaining, 'dry_run': dry_run}
@@ -716,6 +811,7 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
                 '實價總價(萬)': t['total_price_wan'],
                 '同批命中地號': lns,
                 '建議動作':     '請確認此地號是否已有地主異動',
+                '處理狀態':     PENDING_VALUE,
             })
 
     total = len(rows_out)
@@ -756,7 +852,7 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
         '縣市': 8, '地區': 8, '地段': 12, '地號': 10, '所有人': 10,
         '次序': 6, '登記日期': 10, '登記原因': 10, '權利範圍': 12, '已售出': 6,
         '備註': 20, '實價日期': 10, '實價總價(萬)': 10,
-        '同批命中地號': 24, '建議動作': 20,
+        '同批命中地號': 24, '建議動作': 20, '處理狀態': 14,
     }
     for col_idx, col_name in enumerate(REPORT_COLS, 1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = \
