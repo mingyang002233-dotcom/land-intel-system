@@ -55,9 +55,14 @@ LATEST_REPORT = LATEST_DIR / '實價提醒報表_最新完成版.xlsx'
 
 # 報表欄位（獨立報表，不寫主清冊）
 REPORT_COLS = [
+    # ── 地主基本資料（對齊正式清冊欄位順序）──
     '縣市', '地區', '地段', '地號', '所有人',
-    '次序', '登記日期', '登記原因', '權利範圍', '已售出', '備註',
-    '實價日期', '實價總價(萬)', '同批命中地號', '建議動作', '處理狀態',
+    '地址', '電話', '備註', '已售出',
+    '次序', '登記日期', '登記原因', '土地總坪數', '權利範圍',
+    # ── 實價登錄資訊 ──
+    '實價提醒狀態', '實價成交日期', '實價總價(萬)', '實價單價(元/㎡)', '實價備註',
+    # ── 處理欄位 ──
+    '建議動作', '處理狀態', '最後比對日', '實價交易土地筆數', '同批命中地號',
 ]
 
 # 同事可填入的處理狀態值
@@ -430,7 +435,7 @@ def reconcile_realprice_alerts(dry_run: bool = False) -> dict:
 
     sec_col    = col('地段')
     no_col     = col('地號')
-    date_col   = col('實價日期')
+    date_col   = col('實價成交日期') or col('實價日期')  # 新欄名，舊版相容
     action_col = col('建議動作')
     status_col = col('處理狀態')   # 同事人工確認欄（新）
     owner_col  = col('所有權人') or col('所有人')
@@ -796,22 +801,30 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
         at  = a['alert_type']
         for m in a['hit_masters']:
             rows_out.append({
-                '縣市':         m['city']              or '',
-                '地區':         m['district']          or '',
-                '地段':         m['section_raw']       or '',
-                '地號':         m['land_no_raw']       or '',
-                '所有人':       m['owner_name']        or '',
-                '次序':         m.get('reg_seq')       or '',
-                '登記日期':     roc_date(m.get('reg_date', '')),
-                '登記原因':     m.get('reg_reason')    or '',
-                '權利範圍':     m.get('ownership_range') or '',
-                '已售出':       '是' if m['is_sold'] == 1 else '否',
-                '備註':         m.get('note')          or '',
-                '實價日期':     roc_date(t['trade_date']),
-                '實價總價(萬)': t['total_price_wan'],
-                '同批命中地號': lns,
-                '建議動作':     '請確認此地號是否已有地主異動',
-                '處理狀態':     PENDING_VALUE,
+                '縣市':             m['city']                   or '',
+                '地區':             m['district']               or '',
+                '地段':             m['section_raw']            or '',
+                '地號':             m['land_no_raw']            or '',
+                '所有人':           m['owner_name']             or '',
+                '地址':             m.get('address')            or '',
+                '電話':             m.get('phone')              or '',
+                '備註':             m.get('note')               or '',
+                '已售出':           '是' if m['is_sold'] == 1 else '否',
+                '次序':             m.get('reg_seq')            or '',
+                '登記日期':         roc_date(m.get('reg_date', '')),
+                '登記原因':         m.get('reg_reason')         or '',
+                '土地總坪數':       m.get('total_area_ping')    or '',
+                '權利範圍':         m.get('ownership_range')    or '',
+                '實價提醒狀態':     at,
+                '實價成交日期':     roc_date(t['trade_date']),
+                '實價總價(萬)':     t['total_price_wan'],
+                '實價單價(元/㎡)':  t.get('unit_price_per_sqm') or '',
+                '實價備註':         t.get('note')               or '',
+                '建議動作':         '請確認此地號是否已有地主異動',
+                '處理狀態':         PENDING_VALUE,
+                '最後比對日':       date.today().strftime('%Y-%m-%d'),
+                '實價交易土地筆數': a['tx_parcel_count'],
+                '同批命中地號':     lns,
             })
 
     total = len(rows_out)
@@ -874,10 +887,13 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
 
     # 欄寬
     col_widths = {
-        '縣市': 8, '地區': 8, '地段': 12, '地號': 10, '所有人': 10,
-        '次序': 6, '登記日期': 10, '登記原因': 10, '權利範圍': 12, '已售出': 6,
-        '備註': 20, '實價日期': 10, '實價總價(萬)': 10,
-        '同批命中地號': 24, '建議動作': 20, '處理狀態': 14,
+        '縣市': 8,  '地區': 8,   '地段': 12,  '地號': 10,  '所有人': 10,
+        '地址': 30, '電話': 16,  '備註': 20,  '已售出': 6,
+        '次序': 6,  '登記日期': 10, '登記原因': 10, '土地總坪數': 10, '權利範圍': 12,
+        '實價提醒狀態': 14, '實價成交日期': 10, '實價總價(萬)': 10,
+        '實價單價(元/㎡)': 12, '實價備註': 14,
+        '建議動作': 16, '處理狀態': 14, '最後比對日': 10,
+        '實價交易土地筆數': 10, '同批命中地號': 24,
     }
     for col_idx, col_name in enumerate(REPORT_COLS, 1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = \
