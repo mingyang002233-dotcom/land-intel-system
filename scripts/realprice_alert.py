@@ -826,23 +826,48 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
     ws = wb.active
     ws.title = '實價提醒'
 
+    from openpyxl.worksheet.datavalidation import DataValidation
+
     # Header
-    header_fill = PatternFill('solid', fgColor='FFC000')
-    header_font = Font(bold=True)
+    header_fill  = PatternFill('solid', fgColor='FFC000')
+    status_fill  = PatternFill('solid', fgColor='70AD47')  # 綠：處理狀態欄標題
+    header_font  = Font(bold=True)
+    status_col_idx = REPORT_COLS.index('處理狀態') + 1
+
     for col_idx, col_name in enumerate(REPORT_COLS, 1):
         cell = ws.cell(row=1, column=col_idx, value=col_name)
-        cell.fill = header_fill
+        cell.fill = status_fill if col_name == '處理狀態' else header_fill
         cell.font = header_font
 
     # Data
-    alert_fill   = PatternFill('solid', fgColor='FFEB9C')  # 黃：高度疑似
-    sold_fill    = PatternFill('solid', fgColor='FFCCCC')  # 紅：已售地主再命中
+    alert_fill        = PatternFill('solid', fgColor='FFEB9C')  # 黃：高度疑似
+    sold_fill         = PatternFill('solid', fgColor='FFCCCC')  # 紅：已售地主再命中
+    confirmed_fill    = PatternFill('solid', fgColor='E2EFDA')  # 淡綠：人工已確認
 
     for row_idx, r in enumerate(rows_out, 2):
         fill = sold_fill if r['已售出'] == '是' else alert_fill
         for col_idx, col_name in enumerate(REPORT_COLS, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=r.get(col_name))
-            cell.fill = fill
+            # 處理狀態欄獨立底色
+            if col_name == '處理狀態':
+                cell.fill = confirmed_fill if r.get('處理狀態') == HUMAN_CONFIRMED_VALUE else PatternFill('solid', fgColor='EBF5EB')
+            else:
+                cell.fill = fill
+
+    # ── 下拉選單：處理狀態欄（第 2 列到最後一列）──
+    status_col_letter = ws.cell(row=1, column=status_col_idx).column_letter
+    last_row = len(rows_out) + 1
+    dv = DataValidation(
+        type='list',
+        formula1=f'"{PENDING_VALUE},{HUMAN_CONFIRMED_VALUE}"',
+        allow_blank=False,
+        showDropDown=False,   # False = 顯示下拉箭頭
+        showErrorMessage=True,
+        errorTitle='無效輸入',
+        error=f'請選擇「{PENDING_VALUE}」或「{HUMAN_CONFIRMED_VALUE}」',
+    )
+    dv.sqref = f'{status_col_letter}2:{status_col_letter}{last_row}'
+    ws.add_data_validation(dv)
 
     # 凍結標題列
     ws.freeze_panes = 'A2'
