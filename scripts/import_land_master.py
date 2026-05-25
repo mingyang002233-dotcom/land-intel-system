@@ -279,7 +279,7 @@ UPDATE_SQL = """
 UPDATE land_master SET
     updated_at         = :updated_at,
     zone_type          = :zone_type,
-    location_tag       = :location_tag,
+    location_tag       = COALESCE(NULLIF(:location_tag, ''), location_tag),
     announced_value    = :announced_value,
     cause_date         = :cause_date,
     owner_name         = :owner_name,
