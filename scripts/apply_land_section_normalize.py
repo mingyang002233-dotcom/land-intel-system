@@ -30,16 +30,18 @@ import pandas as pd
 
 DB_PATH   = Path("/Users/xiaomingyang/projects/land-intel-system/data/database/land_master.db")
 REF_CSV   = Path("/Users/xiaomingyang/projects/land-intel-system/data/reference/land_section_codes.csv")
-LOG_DIR   = Path("/Users/xiaomingyang/Desktop/excel土地資料維護/output")
+LOG_DIR    = Path("/Users/xiaomingyang/Desktop/excel土地資料維護/output")
+EXCEL_DIR  = Path("/Users/xiaomingyang/Desktop/excel土地資料維護/終極版/每月快照")
 BACKUP_DIR = Path("/Users/xiaomingyang/Desktop/excel土地資料維護/最新完成版/backup")
 
 APPLY_MODE = '--apply' in sys.argv
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+EXCEL_DIR.mkdir(parents=True, exist_ok=True)
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
 LOG_PATH  = LOG_DIR / f"section_normalize_log_{TIMESTAMP}.csv"
-EXCEL_OUT = LOG_DIR / f"land_master_normalized_{TIMESTAMP}.xlsx"
+EXCEL_OUT = EXCEL_DIR / f"land_master_normalized_{TIMESTAMP}.xlsx"
 DB_BACKUP = BACKUP_DIR / f"land_master_backup_{TIMESTAMP}.db"
 
 # ── 官方段代碼參照表 ────────────────────────────────────────────
