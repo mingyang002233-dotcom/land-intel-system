@@ -55,16 +55,15 @@ LATEST_REPORT = LATEST_DIR / '實價提醒報表_最新完成版.xlsx'
 
 # 報表欄位（獨立報表，不寫主清冊）
 REPORT_COLS = [
-    # ── 主清冊完整欄位（32 欄，順序與欄名完全一致）──
+    # ── 主清冊欄位（25 欄，移除：統一編號遮罩、權利範圍、5個系統欄）──
     '更新日期', '分區', '位置',
     '縣市', '地區', '地段', '小段', '地號', '公告現值',
     '次序', '登記日期', '登記原因', '發生日期',
-    '所有權人', '統一編號（遮罩）', '統一編號（完整）',
+    '所有權人', '統一編號（完整）',
     '郵遞區號', '住址', '已售出',
-    '分母', '分子', '持分', '持分坪數', '土地總坪數', '權利範圍',
+    '分母', '分子', '持分', '持分坪數', '土地總坪數',
     '備註', '電話',
-    '系統處理狀態', '系統處理備註', '系統來源', '系統更新時間', '系統批次ID',
-    # ── 實價提醒欄位（接在主清冊後）──
+    # ── 實價提醒欄位（10 欄）──
     '實價提醒狀態', '實價成交日期', '實價總價(萬)', '實價單價(元/㎡)', '實價備註',
     '建議動作', '處理狀態', '最後比對日', '實價交易土地筆數', '同批命中地號',
 ]
@@ -349,7 +348,14 @@ def build_alerts(lm_idx: dict, lt_rows: list[dict]) -> list[dict]:
         seen_dedup.add(dedup_key)
 
         # ── 排除規則：已人工確認（同事在 Excel 選「人工已確認」並執行過 reconcile）──
-        if dedup_key in confirmed_keys:
+        # confirmed_keys 格式：human|raw_sec|raw_no|trade_date(民國)
+        # build_alerts 的 trade_date 是 ISO；比對時轉成民國格式
+        trade_date_roc = roc_date(trade_date)
+        any_confirmed = any(
+            f'human|{m["section_raw"]}|{m["land_no_raw"]}|{trade_date_roc}' in confirmed_keys
+            for m in hit_masters
+        )
+        if any_confirmed:
             continue
 
         # ── 排除規則：主清冊已反映此次買賣 ──
@@ -710,7 +716,7 @@ def reconcile_sold_status(dry_run: bool = False) -> dict:
                 SET is_sold = 1,
                     sys_note = COALESCE(sys_note || ' | ', '') || ?
                 WHERE rowid = ?
-            """, (f'reconcile_sold {today_str}', rid))
+            """, ('系統判定已售', rid))
         con.commit()
         updated_db = len(to_sell_rowids)
         print(f'[reconcile_sold] SQLite 已更新 {updated_db} 筆 is_sold=1')
@@ -804,12 +810,15 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
     out_path  = REPORT_DIR / f'實價提醒報表_{ts}.xlsx'
 
     # 展開 alert → 各 master 列（每位地主一列）
+    # 已售出（is_sold=1）的地主不進報表，已視為結案
     rows_out = []
     for a in alerts:
         t   = a['sample_t']
         lns = '、'.join(a['unique_land_nos'])
         at  = a['alert_type']
         for m in a['hit_masters']:
+            if m.get('is_sold') == 1:
+                continue
             # 持分：分子/分母 組合顯示
             # 持分：整數顯示（去掉 .0）
             def _int(v):
@@ -865,6 +874,8 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
                 '最後比對日':       date.today().strftime('%Y-%m-%d'),
                 '實價交易土地筆數': a['tx_parcel_count'],
                 '同批命中地號':     lns,
+                # 內部判斷用，不輸出到欄位
+                '_trade_date_iso':  t.get('trade_date', '') or '',
             })
 
     total = len(rows_out)
@@ -881,31 +892,53 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
 
     from openpyxl.worksheet.datavalidation import DataValidation
 
-    # Header
-    header_fill  = PatternFill('solid', fgColor='FFC000')
-    status_fill  = PatternFill('solid', fgColor='70AD47')  # 綠：處理狀態欄標題
-    header_font  = Font(bold=True)
+    # ── 格式全部比照主清冊 ──
+    from openpyxl.styles import Border, Side
+    from datetime import timedelta
+
+    header_fill = PatternFill('solid', fgColor='1F4E79')   # 主清冊深藍
+    header_font = Font(bold=True, size=10, name='微軟正黑體', color='FFFFFF')
+    data_font   = Font(size=10, name='微軟正黑體')
+    recent_fill = PatternFill('solid', fgColor='FFEB9C')   # 半年內淺黃
+    thin_border = Border(
+        left=Side(style='thin', color='D9D9D9'),
+        right=Side(style='thin', color='D9D9D9'),
+        top=Side(style='thin', color='D9D9D9'),
+        bottom=Side(style='thin', color='D9D9D9'),
+    )
+
     status_col_idx = REPORT_COLS.index('處理狀態') + 1
+
+    # 數值格式欄位
+    NUM2_COLS = {'土地總坪數', '持分坪數', '實價總價(萬)', '實價單價(元/㎡)'}
 
     for col_idx, col_name in enumerate(REPORT_COLS, 1):
         cell = ws.cell(row=1, column=col_idx, value=col_name)
-        cell.fill = status_fill if col_name == '處理狀態' else header_fill
+        cell.fill = header_fill
         cell.font = header_font
 
-    # Data
-    alert_fill        = PatternFill('solid', fgColor='FFEB9C')  # 黃：高度疑似
-    sold_fill         = PatternFill('solid', fgColor='FFCCCC')  # 紅：已售地主再命中
-    confirmed_fill    = PatternFill('solid', fgColor='E2EFDA')  # 淡綠：人工已確認
+    # 狀態底色規則：半年內實價 → 淺黃；其餘無底色，但補格線
+    # （已售出 is_sold=1 已在展開階段過濾，不進報表）
+    half_year_ago = date.today() - timedelta(days=180)
+
+    def _is_recent(trade_date_str: str) -> bool:
+        if not trade_date_str:
+            return False
+        try:
+            return date.fromisoformat(trade_date_str) >= half_year_ago
+        except Exception:
+            return False
 
     for row_idx, r in enumerate(rows_out, 2):
-        fill = sold_fill if r['已售出'] == '是' else alert_fill
+        row_fill = recent_fill if _is_recent(r.get('_trade_date_iso', '')) else None
         for col_idx, col_name in enumerate(REPORT_COLS, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=r.get(col_name))
-            # 處理狀態欄獨立底色
-            if col_name == '處理狀態':
-                cell.fill = confirmed_fill if r.get('處理狀態') == HUMAN_CONFIRMED_VALUE else PatternFill('solid', fgColor='EBF5EB')
-            else:
-                cell.fill = fill
+            cell.font = data_font
+            cell.border = thin_border
+            if row_fill:
+                cell.fill = row_fill
+            if col_name in NUM2_COLS:
+                cell.number_format = '#,##0.00'
 
     # ── 下拉選單：處理狀態欄（第 2 列到最後一列）──
     status_col_letter = ws.cell(row=1, column=status_col_idx).column_letter
@@ -925,21 +958,24 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
     # 凍結標題列
     ws.freeze_panes = 'A2'
 
+    # AutoFilter：涵蓋全部欄位與資料列
+    last_col_letter = ws.cell(1, len(REPORT_COLS)).column_letter
+    ws.auto_filter.ref = f'A1:{last_col_letter}{len(rows_out) + 1}'
+
     # 欄寬
     col_widths = {
-        '更新日期': 12,  '分區': 8,    '位置': 12,
-        '縣市': 8,   '地區': 8,    '地段': 12,  '小段': 8,   '地號': 10,  '公告現值': 10,
-        '次序': 6,   '登記日期': 10, '登記原因': 10, '發生日期': 10,
-        '所有權人': 10, '統一編號（遮罩）': 14, '統一編號（完整）': 14,
-        '郵遞區號': 8, '住址': 30,  '已售出': 6,
-        '分母': 6,   '分子': 6,    '持分': 10,  '持分坪數': 10,
-        '土地總坪數': 10, '權利範圍': 12, '備註': 20,  '電話': 16,
-        '系統處理狀態': 12, '系統處理備註': 20, '系統來源': 12,
-        '系統更新時間': 16, '系統批次ID': 14,
-        '實價提醒狀態': 14, '實價成交日期': 10, '實價總價(萬)': 10,
-        '實價單價(元/㎡)': 12, '實價備註': 14,
-        '建議動作': 16, '處理狀態': 14, '最後比對日': 10,
-        '實價交易土地筆數': 10, '同批命中地號': 24,
+        '更新日期': 11,  '分區': 8,    '位置': 14,
+        '縣市': 20,  '地區': 8,    '地段': 14,  '小段': 10,  '地號': 12,  '公告現值': 10,
+        '次序': 6,   '登記日期': 11, '登記原因': 10, '發生日期': 11,
+        '所有權人': 10, '統一編號（完整）': 16,
+        '郵遞區號': 8,  '住址': 32,  '已售出': 6,
+        '分母': 6,   '分子': 6,    '持分': 10,  '持分坪數': 10,  '土地總坪數': 10,
+        '備註': 28,  '電話': 18,
+        # 實價提醒附加欄
+        '實價提醒狀態': 14, '實價成交日期': 12, '實價總價(萬)': 12,
+        '實價單價(元/㎡)': 14, '實價備註': 16,
+        '建議動作': 24, '處理狀態': 14, '最後比對日': 12,
+        '實價交易土地筆數': 14, '同批命中地號': 28,
     }
     for col_idx, col_name in enumerate(REPORT_COLS, 1):
         ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = \
