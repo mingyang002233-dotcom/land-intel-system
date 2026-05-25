@@ -55,11 +55,14 @@ LATEST_REPORT = LATEST_DIR / '實價提醒報表_最新完成版.xlsx'
 
 # 報表欄位（獨立報表，不寫主清冊）
 REPORT_COLS = [
-    # ── 地主基本資料（對齊正式清冊欄位順序）──
-    '縣市', '地區', '地段', '地號', '所有人',
-    '地址', '電話', '備註', '已售出',
-    '次序', '登記日期', '登記原因', '土地總坪數', '權利範圍',
-    # ── 實價登錄資訊 ──
+    # ── 土地基本資料（比照主清冊欄位順序）──
+    '縣市', '地區', '地段', '小段', '地號', '公告現值',
+    '次序', '登記日期', '登記原因', '發生日期',
+    '所有權人', '統一編號（遮罩）', '統一編號（完整）',
+    '郵遞區號', '住址', '已售出',
+    '分母', '分子', '持分', '持分坪數', '土地總坪數', '權利範圍',
+    '備註', '電話',
+    # ── 實價登錄資訊（接在土地欄後）──
     '實價提醒狀態', '實價成交日期', '實價總價(萬)', '實價單價(元/㎡)', '實價備註',
     # ── 處理欄位 ──
     '建議動作', '處理狀態', '最後比對日', '實價交易土地筆數', '同批命中地號',
@@ -169,9 +172,13 @@ def load_land_master() -> tuple[list[dict], dict]:
     con.row_factory = sqlite3.Row
     rows = [dict(r) for r in con.execute("""
         SELECT city, district, normalized_section, section_raw,
-               normalized_land_no, land_no_raw, owner_name,
-               address, phone, note, is_sold,
-               reg_seq, reg_date, reg_reason, total_area_ping, ownership_range,
+               sub_section, normalized_land_no, land_no_raw,
+               announced_value, reg_seq, reg_date, reg_reason, cause_date,
+               owner_name, owner_id_masked, owner_id_full,
+               postal_code, address, is_sold,
+               share_denom, share_numer, actual_owned_area,
+               total_area_ping, ownership_range,
+               note, phone,
                land_match_key, event_key
         FROM land_master
     """).fetchall()]
@@ -800,26 +807,49 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
         lns = '、'.join(a['unique_land_nos'])
         at  = a['alert_type']
         for m in a['hit_masters']:
+            # 持分：分子/分母 組合顯示
+            # 持分：整數顯示（去掉 .0）
+            def _int(v):
+                if v is None: return ''
+                try: return str(int(float(v)))
+                except: return str(v)
+            denom = _int(m.get('share_denom'))
+            numer = _int(m.get('share_numer'))
+            持分  = f'{numer}/{denom}' if (numer and denom) else ''
+
             rows_out.append({
-                '縣市':             m['city']                   or '',
-                '地區':             m['district']               or '',
-                '地段':             m['section_raw']            or '',
-                '地號':             m['land_no_raw']            or '',
-                '所有人':           m['owner_name']             or '',
-                '地址':             m.get('address')            or '',
-                '電話':             m.get('phone')              or '',
-                '備註':             m.get('note')               or '',
-                '已售出':           '是' if m['is_sold'] == 1 else '否',
-                '次序':             m.get('reg_seq')            or '',
+                # ── 土地基本資料（主清冊欄位順序）──
+                '縣市':             m['city']                    or '',
+                '地區':             m['district']                or '',
+                '地段':             m['section_raw']             or '',
+                '小段':             m.get('sub_section')         or '',
+                '地號':             m['land_no_raw']             or '',
+                '公告現值':         m.get('announced_value')     or '',
+                '次序':             m.get('reg_seq')             or '',
                 '登記日期':         roc_date(m.get('reg_date', '')),
-                '登記原因':         m.get('reg_reason')         or '',
-                '土地總坪數':       m.get('total_area_ping')    or '',
-                '權利範圍':         m.get('ownership_range')    or '',
+                '登記原因':         m.get('reg_reason')          or '',
+                '發生日期':         roc_date(m.get('cause_date', '')),
+                '所有權人':         m['owner_name']              or '',
+                '統一編號（遮罩）': m.get('owner_id_masked')     or '',
+                '統一編號（完整）': m.get('owner_id_full')       or '',
+                '郵遞區號':         m.get('postal_code')         or '',
+                '住址':             m.get('address')             or '',
+                '已售出':           '是' if m['is_sold'] == 1 else '否',
+                '分母':             denom,
+                '分子':             numer,
+                '持分':             持分,
+                '持分坪數':         m.get('actual_owned_area')   or '',
+                '土地總坪數':       m.get('total_area_ping')     or '',
+                '權利範圍':         m.get('ownership_range')     or '',
+                '備註':             m.get('note')                or '',
+                '電話':             m.get('phone')               or '',
+                # ── 實價登錄資訊 ──
                 '實價提醒狀態':     at,
                 '實價成交日期':     roc_date(t['trade_date']),
                 '實價總價(萬)':     t['total_price_wan'],
-                '實價單價(元/㎡)':  t.get('unit_price_per_sqm') or '',
-                '實價備註':         t.get('note')               or '',
+                '實價單價(元/㎡)':  t.get('unit_price_per_sqm')  or '',
+                '實價備註':         t.get('note')                or '',
+                # ── 處理欄位 ──
                 '建議動作':         '請確認此地號是否已有地主異動',
                 '處理狀態':         PENDING_VALUE,
                 '最後比對日':       date.today().strftime('%Y-%m-%d'),
@@ -887,9 +917,12 @@ def generate_report(alerts: list[dict], dry_run: bool) -> tuple[int, Path | None
 
     # 欄寬
     col_widths = {
-        '縣市': 8,  '地區': 8,   '地段': 12,  '地號': 10,  '所有人': 10,
-        '地址': 30, '電話': 16,  '備註': 20,  '已售出': 6,
-        '次序': 6,  '登記日期': 10, '登記原因': 10, '土地總坪數': 10, '權利範圍': 12,
+        '縣市': 8,   '地區': 8,    '地段': 12,  '小段': 8,   '地號': 10,  '公告現值': 10,
+        '次序': 6,   '登記日期': 10, '登記原因': 10, '發生日期': 10,
+        '所有權人': 10, '統一編號（遮罩）': 14, '統一編號（完整）': 14,
+        '郵遞區號': 8, '住址': 30,  '已售出': 6,
+        '分母': 6,   '分子': 6,    '持分': 10,  '持分坪數': 10,
+        '土地總坪數': 10, '權利範圍': 12, '備註': 20,  '電話': 16,
         '實價提醒狀態': 14, '實價成交日期': 10, '實價總價(萬)': 10,
         '實價單價(元/㎡)': 12, '實價備註': 14,
         '建議動作': 16, '處理狀態': 14, '最後比對日': 10,
